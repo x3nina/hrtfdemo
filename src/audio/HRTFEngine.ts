@@ -1,3 +1,6 @@
+import { getKemarHRIR } from './KemarLoader'
+import { getSofaHRIR } from './SofaLoader'
+
 export type AudioSourceId = 'pink-noise' | 'white-noise' | 'tone-440' | 'tone-1k' | 'file'
 
 export interface AudioSource {
@@ -14,9 +17,6 @@ export const AUDIO_SOURCES: AudioSource[] = [
   { id: 'file', name: 'Load file…', generated: false },
 ]
 
-// Azimuth/elevation to Web Audio API Cartesian (right-hand, +Y up, -Z forward)
-// Convention: az=0 front, az=90 left, az=180 back, az=270 right
-// el=0 horizontal, el=90 up, el=-90 down
 function sphericalToCartesian(azDeg: number, elDeg: number, r = 1) {
   const az = (azDeg * Math.PI) / 180
   const el = (elDeg * Math.PI) / 180
@@ -29,19 +29,39 @@ function sphericalToCartesian(azDeg: number, elDeg: number, r = 1) {
 
 export class HRTFEngine {
   private ctx: AudioContext | null = null
-  private panner: PannerNode | null = null
   private gainNode: GainNode | null = null
+
+  // PannerNode path (browser built-in HRTF)
+  private panner: PannerNode | null = null
+
+  // ConvolverNode path (custom HRTF)
+  private convL: ConvolverNode | null = null
+  private convR: ConvolverNode | null = null
+  private merger: ChannelMergerNode | null = null
+
   private source: AudioBufferSourceNode | null = null
   private fileBuffer: AudioBuffer | null = null
   private _playing = false
 
+  private mode: 'panner' | 'convolver' = 'panner'
+  private profileId = 'browser-hrtf'
+  private currentAz = 0
+  private currentEl = 0
+  private listenerYaw = 0
+  private listenerPitch = 0
+
+  // Debounce convolver updates to avoid rapid refetches during dragging
+  private convolverUpdateTimer: ReturnType<typeof setTimeout> | null = null
+
   async init() {
     if (this.ctx) return
     this.ctx = new AudioContext()
+
     this.gainNode = this.ctx.createGain()
     this.gainNode.gain.value = 0.8
     this.gainNode.connect(this.ctx.destination)
 
+    // PannerNode path
     this.panner = this.ctx.createPanner()
     this.panner.panningModel = 'HRTF'
     this.panner.distanceModel = 'inverse'
@@ -50,71 +70,176 @@ export class HRTFEngine {
     this.panner.coneInnerAngle = 360
     this.panner.coneOuterAngle = 0
     this.panner.coneOuterGain = 0
+
+    // ConvolverNode path
+    this.merger = this.ctx.createChannelMerger(2)
+    this.convL = this.ctx.createConvolver()
+    this.convL.normalize = false
+    this.convR = this.ctx.createConvolver()
+    this.convR.normalize = false
+    this.convL.connect(this.merger, 0, 0)
+    this.convR.connect(this.merger, 0, 1)
+
+    // Default: panner path active
     this.panner.connect(this.gainNode)
 
     // Listener at origin facing forward (-Z)
-    this.ctx.listener.positionX.value = 0
-    this.ctx.listener.positionY.value = 0
-    this.ctx.listener.positionZ.value = 0
-    this.ctx.listener.forwardX.value = 0
-    this.ctx.listener.forwardY.value = 0
-    this.ctx.listener.forwardZ.value = -1
-    this.ctx.listener.upX.value = 0
-    this.ctx.listener.upY.value = 1
-    this.ctx.listener.upZ.value = 0
+    const l = this.ctx.listener
+    l.positionX.value = 0
+    l.positionY.value = 0
+    l.positionZ.value = 0
+    l.forwardX.value = 0
+    l.forwardY.value = 0
+    l.forwardZ.value = -1
+    l.upX.value = 0
+    l.upY.value = 1
+    l.upZ.value = 0
   }
 
   async resume() {
     if (this.ctx?.state === 'suspended') await this.ctx.resume()
   }
 
-  // --- source position ---
+  async setProfile(id: string) {
+    if (!this.ctx) await this.init()
+    this.profileId = id
 
-  setSourcePosition(azDeg: number, elDeg: number, distance = 1) {
-    if (!this.panner) return
-    const { x, y, z } = sphericalToCartesian(azDeg, elDeg, distance)
-    this.panner.positionX.value = x
-    this.panner.positionY.value = y
-    this.panner.positionZ.value = z
+    if (id === 'browser-hrtf') {
+      this.activatePannerPath()
+    } else {
+      this.activateConvolverPath()
+      // Load HRIR for current position under new profile
+      await this.updateConvolverBuffers()
+    }
   }
 
-  // --- listener orientation (head rotation) ---
-
-  setListenerOrientation(azDeg: number, elDeg: number) {
-    if (!this.ctx) return
-    const { x, y, z } = sphericalToCartesian(azDeg, elDeg)
-    // forward = direction listener is looking
-    this.ctx.listener.forwardX.value = -x  // negate: (az,el) → direction, flip for forward
-    this.ctx.listener.forwardY.value = -y
-    this.ctx.listener.forwardZ.value = -z
+  private activatePannerPath() {
+    if (this.mode === 'panner') return
+    this.merger?.disconnect()
+    this.panner?.connect(this.gainNode!)
+    this.mode = 'panner'
   }
 
-  // More direct: set listener forward vector from head yaw (horizontal) + pitch (vertical)
-  setListenerFromYawPitch(yawDeg: number, pitchDeg: number) {
-    if (!this.ctx) return
-    const yaw = (yawDeg * Math.PI) / 180
-    const pitch = (pitchDeg * Math.PI) / 180
-    // forward vector when facing -Z and rotating by yaw (right = positive yaw) and pitch (up = positive)
+  private activateConvolverPath() {
+    if (this.mode === 'convolver') return
+    this.panner?.disconnect()
+    this.merger?.connect(this.gainNode!)
+    this.mode = 'convolver'
+  }
+
+  // Compute source direction relative to listener's head orientation.
+  // PannerNode does this automatically; for ConvolverNode we do it manually.
+  private relativeDir(): { az: number; el: number } {
+    const sAzR = (this.currentAz * Math.PI) / 180
+    const sElR = (this.currentEl * Math.PI) / 180
+    const sx = -Math.sin(sAzR) * Math.cos(sElR)
+    const sy = Math.sin(sElR)
+    const sz = -Math.cos(sAzR) * Math.cos(sElR)
+
+    const yaw = (this.listenerYaw * Math.PI) / 180
+    const pitch = (this.listenerPitch * Math.PI) / 180
+
+    // Listener forward vector
     const fx = Math.sin(yaw) * Math.cos(pitch)
     const fy = Math.sin(pitch)
     const fz = -Math.cos(yaw) * Math.cos(pitch)
-    this.ctx.listener.forwardX.value = fx
-    this.ctx.listener.forwardY.value = fy
-    this.ctx.listener.forwardZ.value = fz
 
-    // up vector: rotate up by pitch only (simplification, no roll)
-    const ux = 0
-    const uy = Math.cos(pitch)
-    const uz = 0
-    this.ctx.listener.upX.value = ux
-    this.ctx.listener.upY.value = uy
-    this.ctx.listener.upZ.value = uz
+    // Right = cross(forward, worldUp=(0,1,0)) / cos(pitch)
+    const cosPitch = Math.cos(pitch)
+    const rx = cosPitch > 1e-4 ? -fz / cosPitch : Math.cos(yaw)
+    const rz = cosPitch > 1e-4 ? fx / cosPitch : Math.sin(yaw)
+
+    // Up = cross(right, forward)
+    const ux = -rz * fy
+    const uy = rz * fx - rx * fz
+    const uz = rx * fy
+
+    // Project source onto head frame
+    const hr = sx * rx + sz * rz          // head-right component
+    const hu = sx * ux + sy * uy + sz * uz // head-up component
+    const hf = sx * fx + sy * fy + sz * fz // head-forward component
+
+    // Back to our spherical: az = atan2(-hr, hf), el = asin(hu)
+    const elDeg = (Math.asin(Math.max(-1, Math.min(1, hu))) * 180) / Math.PI
+    const azRaw = (Math.atan2(-hr, hf) * 180) / Math.PI
+    const azDeg = ((azRaw % 360) + 360) % 360
+
+    return { az: azDeg, el: elDeg }
   }
 
-  // --- playback ---
+  private async updateConvolverBuffers() {
+    if (!this.ctx || this.mode !== 'convolver') return
+    const { az, el } = this.relativeDir()
+    try {
+      const { left, right } = await this.fetchHRIR(az, el)
+      if (this.convL) this.convL.buffer = left
+      if (this.convR) this.convR.buffer = right
+    } catch (e) {
+      console.error('HRIR load failed:', e)
+    }
+  }
+
+  private async fetchHRIR(az: number, el: number) {
+    const ctx = this.ctx!
+    if (this.profileId === 'mit-kemar') {
+      return getKemarHRIR(ctx, az, el)
+    }
+    // listen-XXXX profiles
+    const match = this.profileId.match(/^listen-(\d+)$/)
+    if (match) {
+      return getSofaHRIR(ctx, match[1]!, az, el)
+    }
+    throw new Error(`Unknown profile: ${this.profileId}`)
+  }
+
+  setSourcePosition(azDeg: number, elDeg: number, distance = 1) {
+    this.currentAz = azDeg
+    this.currentEl = elDeg
+
+    if (this.mode === 'panner' && this.panner) {
+      const { x, y, z } = sphericalToCartesian(azDeg, elDeg, distance)
+      this.panner.positionX.value = x
+      this.panner.positionY.value = y
+      this.panner.positionZ.value = z
+    } else if (this.mode === 'convolver') {
+      // Debounce: wait 80ms after last drag event before fetching
+      if (this.convolverUpdateTimer) clearTimeout(this.convolverUpdateTimer)
+      this.convolverUpdateTimer = setTimeout(() => {
+        this.updateConvolverBuffers()
+        this.convolverUpdateTimer = null
+      }, 80)
+    }
+  }
+
+  setListenerFromYawPitch(yawDeg: number, pitchDeg: number) {
+    this.listenerYaw = yawDeg
+    this.listenerPitch = pitchDeg
+
+    if (this.ctx) {
+      const yaw = (yawDeg * Math.PI) / 180
+      const pitch = (pitchDeg * Math.PI) / 180
+      const fx = Math.sin(yaw) * Math.cos(pitch)
+      const fy = Math.sin(pitch)
+      const fz = -Math.cos(yaw) * Math.cos(pitch)
+      this.ctx.listener.forwardX.value = fx
+      this.ctx.listener.forwardY.value = fy
+      this.ctx.listener.forwardZ.value = fz
+      this.ctx.listener.upX.value = 0
+      this.ctx.listener.upY.value = Math.cos(pitch)
+      this.ctx.listener.upZ.value = 0
+    }
+
+    if (this.mode === 'convolver') {
+      if (this.convolverUpdateTimer) clearTimeout(this.convolverUpdateTimer)
+      this.convolverUpdateTimer = setTimeout(() => {
+        this.updateConvolverBuffers()
+        this.convolverUpdateTimer = null
+      }, 80)
+    }
+  }
 
   play(sourceId: AudioSourceId) {
-    if (!this.ctx || !this.panner) return
+    if (!this.ctx) return
     this.stop()
 
     const buf = this.buildBuffer(sourceId)
@@ -123,10 +248,16 @@ export class HRTFEngine {
     this.source = this.ctx.createBufferSource()
     this.source.buffer = buf
     this.source.loop = true
-    this.source.connect(this.panner)
+
+    if (this.mode === 'panner') {
+      this.source.connect(this.panner!)
+    } else {
+      this.source.connect(this.convL!)
+      this.source.connect(this.convR!)
+    }
+
     this.source.start()
     this._playing = true
-
     this.source.addEventListener('ended', () => { this._playing = false })
   }
 
@@ -152,8 +283,6 @@ export class HRTFEngine {
   setVolume(v: number) {
     if (this.gainNode) this.gainNode.gain.value = Math.max(0, Math.min(1, v))
   }
-
-  // --- buffer generation ---
 
   private buildBuffer(id: AudioSourceId): AudioBuffer | null {
     if (!this.ctx) return null
