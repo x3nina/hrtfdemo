@@ -15,7 +15,9 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
+    "@types/three": "^0.184.1",
     "pinia": "^3.0.4",
+    "three": "^0.184.0",
     "vue": "^3.5.32",
     "vue-router": "^5.0.4"
   },
