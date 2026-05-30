@@ -6,7 +6,7 @@ import { PROFILES, type HRTFProfile } from '@/audio/profiles'
 export const useHRTFStore = defineStore('hrtf', () => {
   const initialized = ref(false)
   const playing = ref(false)
-  const currentProfileId = ref('browser-kemar')
+  const currentProfileId = ref('mit-kemar')
   const currentSourceId = ref<AudioSourceId>('pink-noise')
 
   // Sound source spherical position (degrees)
@@ -25,6 +25,7 @@ export const useHRTFStore = defineStore('hrtf', () => {
   async function initialize() {
     await hrtfEngine.init()
     initialized.value = true
+    await hrtfEngine.setProfile(currentProfileId.value)
     hrtfEngine.setSourcePosition(sourceAz.value, sourceEl.value)
   }
 
@@ -60,6 +61,7 @@ export const useHRTFStore = defineStore('hrtf', () => {
     const profile = PROFILES.find((p) => p.id === id)
     if (!profile?.available) return
     currentProfileId.value = id
+    if (initialized.value) await hrtfEngine.setProfile(id)
   }
 
   async function setSource(id: AudioSourceId) {

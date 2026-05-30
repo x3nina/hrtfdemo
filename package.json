@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@types/three": "^0.184.1",
+    "h5wasm": "^0.10.2",
     "pinia": "^3.0.4",
     "three": "^0.184.0",
     "vue": "^3.5.32",
