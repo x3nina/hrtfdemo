@@ -3,10 +3,14 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import HeadScene from '@/components/HeadScene.vue'
 import { useHRTFStore } from '@/stores/hrtf'
+import { useThemeStore } from '@/stores/theme'
 import { AUDIO_SOURCES, type AudioSourceId } from '@/audio/HRTFEngine'
 
 const router = useRouter()
 const hrtf = useHRTFStore()
+const themeStore = useThemeStore()
+
+const sceneBg = computed(() => themeStore.theme === 'dark' ? '#1e1e28' : '#e8e8ee')
 
 const fileInputRef = ref<HTMLInputElement>()
 
@@ -96,6 +100,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
         :azimuth="hrtf.sourceAz"
         :elevation="hrtf.sourceEl"
         :interactive="true"
+        :bg-color="sceneBg"
         @change="onSceneDrag"
       />
 
@@ -128,7 +133,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 .test {
   height: 100%;
   display: flex;
-  background: #e8e8e8;
+  background: var(--bg-alt);
   font-family: inherit;
 }
 
@@ -136,19 +141,19 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 .sidebar {
   width: 220px;
   min-width: 220px;
-  background: #f0f0f0;
+  background: var(--surface);
   padding: 1.5rem 1rem;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
-  border-right: 1px solid #d0d0d0;
+  border-right: 1px solid var(--border-solid);
   overflow-y: auto;
 }
 
 .back-btn {
   background: none;
   border: none;
-  color: #666;
+  color: var(--text-secondary);
   font-size: 0.82rem;
   letter-spacing: 0.06em;
   cursor: pointer;
@@ -156,7 +161,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   text-align: left;
   font-family: inherit;
 }
-.back-btn:hover { color: #333; }
+.back-btn:hover { color: var(--text-primary); }
 
 .sidebar__section { display: flex; flex-direction: column; gap: 0.5rem; }
 
@@ -165,7 +170,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #999;
+  color: var(--text-muted);
   margin: 0;
 }
 
@@ -183,15 +188,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   padding: 0.45rem 0.6rem;
   border-radius: 4px;
   font-size: 0.85rem;
-  color: #666;
+  color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
 }
-.source-list__item:hover { background: #e0e0e0; color: #333; }
+.source-list__item:hover { background: var(--surface-hover); color: var(--text-primary); }
 .source-list__item--active {
   font-weight: 600;
   color: #5c6bc0;
-  background: rgba(92, 107, 192, 0.08);
+  background: rgba(92, 107, 192, 0.1);
 }
 
 /* Profile list */
@@ -208,22 +213,22 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   padding: 0.45rem 0.6rem;
   border-radius: 4px;
   font-size: 0.85rem;
-  color: #666;
+  color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
-.profile-list__item:hover:not(.profile-list__item--locked) { background: #e0e0e0; color: #333; }
-.profile-list__item--active { font-weight: 600; color: #5c6bc0; background: rgba(92, 107, 192, 0.08); }
+.profile-list__item:hover:not(.profile-list__item--locked) { background: var(--surface-hover); color: var(--text-primary); }
+.profile-list__item--active { font-weight: 600; color: #5c6bc0; background: rgba(92, 107, 192, 0.1); }
 .profile-list__item--locked { cursor: default; opacity: 0.5; }
 
 .profile-list__badge {
   font-size: 0.65rem;
   letter-spacing: 0.06em;
-  color: #aaa;
-  background: #e0e0e0;
+  color: var(--text-muted);
+  background: var(--surface-hover);
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
 }
@@ -248,11 +253,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   align-items: baseline;
   gap: 0.35rem;
   font-size: 0.82rem;
-  color: #888;
+  color: var(--text-secondary);
 }
 .pos-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
 .pos-val { font-weight: 600; color: #5c6bc0; font-variant-numeric: tabular-nums; min-width: 3.5ch; }
-.pos-sep { color: #bbb; }
+.pos-sep { color: var(--text-faint); }
 
 .overlay--play {
   bottom: 2rem;
@@ -282,7 +287,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 
 .play-hint {
   font-size: 0.72rem;
-  color: #aaa;
+  color: var(--text-faint);
   letter-spacing: 0.08em;
 }
 
@@ -290,7 +295,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   bottom: 2rem;
   right: 1.5rem;
   font-size: 0.75rem;
-  color: #aaa;
+  color: var(--text-faint);
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }

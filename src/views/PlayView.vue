@@ -3,12 +3,16 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useGameStore } from '@/stores/game'
 import { useHRTFStore } from '@/stores/hrtf'
+import { useThemeStore } from '@/stores/theme'
 import { PROFILES } from '@/audio/profiles'
 import HeadScene from '@/components/HeadScene.vue'
 
 const router = useRouter()
 const game = useGameStore()
 const hrtf = useHRTFStore()
+const themeStore = useThemeStore()
+
+const sceneBg = computed(() => themeStore.theme === 'dark' ? '#1e1e28' : '#e8e8ee')
 
 // Mouse tracking for head rotation
 const isDragging = ref(false)
@@ -197,7 +201,7 @@ onUnmounted(() => {
             :azimuth="game.targetAz"
             :elevation="game.targetEl"
             :interactive="false"
-            bg-color="#f0f0f0"
+            :bg-color="sceneBg"
           />
 
           <!-- Guess marker on 2D overlay (approximate) -->
@@ -243,19 +247,22 @@ onUnmounted(() => {
 <style scoped>
 .play {
   height: 100%;
-  background: #0a0a0f;
+  background: var(--bg-alt);
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
-  overflow: hidden;
-  color: #e0e0e0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  color: var(--text-primary);
   font-family: inherit;
 }
 
 .play--listening {
+  background: #05050a;
   cursor: crosshair;
   user-select: none;
+  overflow: hidden;
 }
 
 /* ── Panels ── */
@@ -275,28 +282,28 @@ onUnmounted(() => {
   letter-spacing: 0.15em;
   text-transform: uppercase;
   margin: 0;
-  color: #fff;
+  color: var(--text-primary);
 }
 
 .panel__body {
   font-size: 0.9rem;
-  color: #888;
+  color: var(--text-secondary);
   line-height: 1.7;
   margin: 0;
 }
 
 kbd {
-  background: rgba(255,255,255,0.1);
+  background: var(--kbd-bg);
   padding: 0.1em 0.4em;
   border-radius: 3px;
   font-family: inherit;
   font-size: 0.9em;
-  border: 1px solid rgba(255,255,255,0.15);
+  border: 1px solid var(--kbd-border);
 }
 
 .avg-score {
   font-size: 0.82rem;
-  color: #666;
+  color: var(--text-secondary);
 }
 
 .profile-selector {
@@ -318,14 +325,19 @@ kbd {
   flex-wrap: wrap;
   gap: 0.4rem;
   justify-content: center;
+  max-height: 20rem;
+  overflow-y: auto;
+  padding: 0.2rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-solid) transparent;
 }
 
 .profile-chip {
   padding: 0.3rem 0.8rem;
   border-radius: 20px;
-  border: 1px solid rgba(255,255,255,0.12);
-  background: rgba(255,255,255,0.04);
-  color: #888;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
   font-size: 0.78rem;
   font-family: inherit;
   cursor: pointer;
@@ -334,7 +346,7 @@ kbd {
 
 .profile-chip:not(:disabled):hover {
   border-color: rgba(92,107,192,0.5);
-  color: #aaa;
+  color: var(--text-primary);
 }
 
 .profile-chip--active {
@@ -356,7 +368,7 @@ kbd {
 
 .panel__hint {
   font-size: 0.75rem;
-  color: #444;
+  color: var(--text-faint);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   margin: 0;
@@ -414,7 +426,7 @@ kbd {
   left: 50%;
   transform: translateX(-50%);
   font-size: 0.75rem;
-  color: #444;
+  color: #555;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -459,8 +471,8 @@ kbd {
   position: absolute;
   inset: 0;
   display: flex;
-  background: #f0f0f0;
-  color: #333;
+  background: var(--bg-alt);
+  color: var(--text-primary);
 }
 
 .reveal__scene {
@@ -492,8 +504,8 @@ kbd {
 .score-panel {
   width: 280px;
   min-width: 280px;
-  background: #fff;
-  border-left: 1px solid #e0e0e0;
+  background: var(--surface);
+  border-left: 1px solid var(--border-solid);
   padding: 2.5rem 1.8rem;
   display: flex;
   flex-direction: column;
@@ -513,7 +525,7 @@ kbd {
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  color: #aaa;
+  color: var(--text-muted);
 }
 .score-msg {
   font-size: 1.1rem;
@@ -525,12 +537,12 @@ kbd {
 .score-details {
   width: 100%;
   font-size: 0.8rem;
-  color: #888;
+  color: var(--text-secondary);
   border-collapse: collapse;
   margin: 0.5rem 0;
 }
 .score-details td { padding: 0.3rem 0.4rem; }
-.score-details td:first-child { color: #bbb; text-align: right; white-space: nowrap; }
+.score-details td:first-child { color: var(--text-faint); text-align: right; white-space: nowrap; }
 
 .score-actions {
   display: flex;
@@ -540,8 +552,8 @@ kbd {
   margin-top: 0.5rem;
 }
 .score-actions .btn { width: 100%; }
-.score-actions .btn--ghost { color: #aaa; border-color: #e0e0e0; }
-.score-actions .btn--ghost:hover { background: #f5f5f5; }
+.score-actions .btn--ghost { color: var(--text-muted); border-color: var(--border-solid); }
+.score-actions .btn--ghost:hover { background: var(--surface-hover); }
 
 /* Transitions */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }

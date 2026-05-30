@@ -44,8 +44,8 @@ const router = useRouter()
   justify-content: center;
   gap: 3rem;
   padding: 2rem;
-  background: #0f0f14;
-  color: #e0e0e0;
+  background: var(--bg);
+  color: var(--text-primary);
 }
 
 .home__header {
@@ -57,7 +57,7 @@ const router = useRouter()
   font-weight: 200;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: #fff;
+  color: var(--text-primary);
   margin: 0;
 }
 
@@ -65,7 +65,7 @@ const router = useRouter()
   margin: 0.5rem 0 0;
   font-size: 0.85rem;
   letter-spacing: 0.12em;
-  color: #888;
+  color: var(--text-secondary);
   text-transform: uppercase;
 }
 
@@ -79,9 +79,9 @@ const router = useRouter()
 .card {
   width: 240px;
   padding: 2.5rem 2rem;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface);
   cursor: pointer;
   text-align: left;
   color: inherit;
@@ -93,7 +93,7 @@ const router = useRouter()
 }
 
 .card:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--surface-hover);
   transform: translateY(-3px);
 }
 
@@ -117,13 +117,13 @@ const router = useRouter()
 
 .card__desc {
   font-size: 0.82rem;
-  color: #888;
+  color: var(--text-secondary);
   line-height: 1.6;
 }
 
 .home__footer {
   font-size: 0.78rem;
-  color: #555;
+  color: var(--text-muted);
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
