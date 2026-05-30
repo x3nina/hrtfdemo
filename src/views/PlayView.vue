@@ -224,14 +224,16 @@ onUnmounted(() => {
           <div class="score-msg" :style="{ color: errorColor }">{{ scoreMsg }}</div>
 
           <table class="score-details">
-            <tr>
-              <td>Target</td>
-              <td>Az {{ Math.round(game.targetAz) }}° · El {{ Math.round(game.targetEl) }}°</td>
-            </tr>
-            <tr>
-              <td>Your look</td>
-              <td>Yaw {{ Math.round(game.guessYaw) }}° · Pitch {{ Math.round(game.guessPitch) }}°</td>
-            </tr>
+            <tbody>
+              <tr>
+                <td>Target</td>
+                <td>Az {{ Math.round(game.targetAz) }}° · El {{ Math.round(game.targetEl) }}°</td>
+              </tr>
+              <tr>
+                <td>Your look</td>
+                <td>Yaw {{ Math.round(game.guessYaw) }}° · Pitch {{ Math.round(game.guessPitch) }}°</td>
+              </tr>
+            </tbody>
           </table>
 
           <div class="score-actions">
