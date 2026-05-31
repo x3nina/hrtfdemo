@@ -41,6 +41,7 @@ const errorColor = computed(() => {
 function startGame() {
   accYaw = 0
   accPitch = 0
+  hrtf.unlockAudio()
   hrtf.setListenerOrientation(0, 0)
   game.startRound()
 }

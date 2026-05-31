@@ -52,7 +52,12 @@ function onKey(e: KeyboardEvent) {
   if (e.code === 'Escape') router.push('/')
 }
 
-onMounted(() => window.addEventListener('keydown', onKey))
+onMounted(() => {
+  window.addEventListener('keydown', onKey)
+  hrtf.stopPlay()
+  hrtf.setListenerOrientation(0, 0)
+  hrtf.setSourcePosition(180, 0)
+})
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
   hrtf.stopPlay()

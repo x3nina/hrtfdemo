@@ -32,7 +32,7 @@ export const useGameStore = defineStore('game', () => {
     phase.value = 'listening'
     score.value = null
 
-    hrtf.startPlay()
+    hrtf.startPlay().catch((e: unknown) => console.error('[game] startPlay failed:', e))
   }
 
   function submitGuess(yaw: number, pitch: number) {
