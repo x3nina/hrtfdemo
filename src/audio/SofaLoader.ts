@@ -34,28 +34,25 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
 
   const h5 = h5module! as typeof import('h5wasm')
   const fname = `${subjectId}.sofa`
-  h5.FS.writeFile(fname, new Uint8Array(ab))
+  h5.FS!.writeFile(fname, new Uint8Array(ab))
 
   const f = new h5.File(fname, 'r')
 
-  // Read sample rate
   type DS = import('h5wasm').Dataset
   const srDataset = f.get('Data.SamplingRate') as DS
   const srVal = srDataset.value as Float64Array | number[]
   const sampleRate = typeof srVal === 'number' ? srVal : srVal[0]!
 
-  // Read source positions [M, 3]
   const posDataset = f.get('SourcePosition') as DS
   const posFlat = posDataset.value as Float64Array
-  const M = posDataset.shape[0]!
+  const M = posDataset.shape![0]!
 
-  // Read IRs [M, 2, N]
   const irDataset = f.get('Data.IR') as DS
   const irFlat = irDataset.value as Float64Array
-  const N = irDataset.shape[2]!
+  const N = irDataset.shape![2]!
 
   f.close()
-  h5.FS.unlink(fname)
+  h5.FS!.unlink(fname)
 
   const positions: SofaHRIRSet['positions'] = []
   const irs: SofaHRIRSet['irs'] = []
@@ -63,8 +60,6 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
   for (let m = 0; m < M; m++) {
     const az = posFlat[m * 3]!
     const el = posFlat[m * 3 + 1]!
-
-    // Convert to unit vector in our app's coordinate system
     const azR = (az * Math.PI) / 180
     const elR = (el * Math.PI) / 180
     const vec: [number, number, number] = [
@@ -90,9 +85,11 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
   return set
 }
 
-// Resampled IR cache — keyed by subjectId + measurement index + output sample rate.
-// Avoids re-running OfflineAudioContext for the same measurement on every call.
+// Float32Array cache — keyed by subjectId + measurement index + output sample rate.
 const resampledCache = new Map<string, { left: Float32Array; right: Float32Array }>()
+
+// AudioBuffer cache — same key, avoids re-allocating buffers on every 60fps position update.
+const audioBufferCache = new Map<string, { left: AudioBuffer; right: AudioBuffer }>()
 
 async function getResampledIR(
   ctx: AudioContext,
@@ -114,34 +111,23 @@ async function getResampledIR(
   return result
 }
 
-// Return the N nearest measurements with inverse-angular-distance weights.
-// dot^k weighting (k=8): at the midpoint between two 15°-spaced measurements
-// each gets ~50%; a measurement 30° away gets ~14% before normalisation.
-export function findNearestN(
-  set: SofaHRIRSet,
-  ourAzDeg: number,
-  ourElDeg: number,
-  N: number,
-): Array<{ idx: number; weight: number }> {
-  const az = (ourAzDeg * Math.PI) / 180
-  const el = (ourElDeg * Math.PI) / 180
+// Returns the index of the measurement whose unit vector has the highest dot product
+// with the query direction — i.e. the nearest measured position on the sphere.
+export function findNearest(set: SofaHRIRSet, azDeg: number, elDeg: number): number {
+  const az = (azDeg * Math.PI) / 180
+  const el = (elDeg * Math.PI) / 180
   const qx = -Math.sin(az) * Math.cos(el)
   const qy = Math.sin(el)
   const qz = -Math.cos(az) * Math.cos(el)
 
-  const scored: Array<{ idx: number; dot: number }> = []
+  let bestIdx = 0
+  let bestDot = -Infinity
   for (let i = 0; i < set.positions.length; i++) {
     const v = set.positions[i]!.vec
-    scored.push({ idx: i, dot: Math.max(0, qx * v[0] + qy * v[1] + qz * v[2]) })
+    const dot = qx * v[0] + qy * v[1] + qz * v[2]
+    if (dot > bestDot) { bestDot = dot; bestIdx = i }
   }
-  scored.sort((a, b) => b.dot - a.dot)
-  const top = scored.slice(0, N)
-
-  const k = 8
-  const rawWeights = top.map(s => s.dot ** k)
-  const total = rawWeights.reduce((a, b) => a + b, 0)
-  if (total < 1e-10) return [{ idx: top[0]!.idx, weight: 1 }]
-  return top.map((s, j) => ({ idx: s.idx, weight: rawWeights[j]! / total }))
+  return bestIdx
 }
 
 async function resampleIfNeeded(
@@ -162,21 +148,6 @@ async function resampleIfNeeded(
   return rendered.getChannelData(0)
 }
 
-// Return AudioBuffers for a single measured HRIR (with resampling + caching).
-export async function getIRBuffers(
-  ctx: AudioContext,
-  set: SofaHRIRSet,
-  subjectId: string,
-  idx: number,
-): Promise<{ left: AudioBuffer; right: AudioBuffer }> {
-  const { left: resL, right: resR } = await getResampledIR(ctx, set, subjectId, idx)
-  const leftBuf = ctx.createBuffer(1, resL.length, ctx.sampleRate)
-  leftBuf.getChannelData(0).set(resL)
-  const rightBuf = ctx.createBuffer(1, resR.length, ctx.sampleRate)
-  rightBuf.getChannelData(0).set(resR)
-  return { left: leftBuf, right: rightBuf }
-}
-
 // Pre-loads every measurement's resampled IR into the cache. At matching sample
 // rates (44100→44100) this resolves in a few microtask ticks (no OfflineAudioContext
 // needed). Position updates become fully synchronous once this resolves.
@@ -192,71 +163,61 @@ export async function prewarmResampledIRs(
   )
 }
 
-// Returns a blended AudioBuffer pair if all N nearest IRs are already cached;
-// returns null (without throwing) if the cache is not yet warm.
-export function tryBlendedBuffersSync(
+async function getAudioBuffers(
+  ctx: AudioContext,
+  set: SofaHRIRSet,
+  subjectId: string,
+  idx: number,
+): Promise<{ left: AudioBuffer; right: AudioBuffer }> {
+  const key = `${subjectId}_${idx}_${ctx.sampleRate}`
+  const hit = audioBufferCache.get(key)
+  if (hit) return hit
+  const { left: resL, right: resR } = await getResampledIR(ctx, set, subjectId, idx)
+  const leftBuf = ctx.createBuffer(1, resL.length, ctx.sampleRate)
+  leftBuf.getChannelData(0).set(resL)
+  const rightBuf = ctx.createBuffer(1, resR.length, ctx.sampleRate)
+  rightBuf.getChannelData(0).set(resR)
+  const result = { left: leftBuf, right: rightBuf }
+  audioBufferCache.set(key, result)
+  return result
+}
+
+// Returns AudioBuffers for the nearest measured HRIR. Works before the cache is warm.
+export async function getSofaHRIR(
+  ctx: AudioContext,
+  subjectId: string,
+  azDeg: number,
+  elDeg: number,
+): Promise<{ left: AudioBuffer; right: AudioBuffer }> {
+  const set = await loadSofaSet(subjectId)
+  const idx = findNearest(set, azDeg, elDeg)
+  return getAudioBuffers(ctx, set, subjectId, idx)
+}
+
+// Sync lookup — returns the nearest IR's AudioBuffers plus the measurement index.
+// Returns null if the cache is not yet warm. After prewarmResampledIRs resolves,
+// this always succeeds. Callers can use the returned idx to skip redundant swaps.
+export function tryNearestBuffersSync(
   ctx: AudioContext,
   set: SofaHRIRSet,
   subjectId: string,
   az: number,
   el: number,
-  N: number,
-): { left: AudioBuffer; right: AudioBuffer } | null {
-  const nearest = findNearestN(set, az, el, N)
-  const irs: Array<{ left: Float32Array; right: Float32Array; weight: number }> = []
-  for (const { idx, weight } of nearest) {
-    const cached = resampledCache.get(`${subjectId}_${idx}_${ctx.sampleRate}`)
-    if (!cached) return null
-    irs.push({ ...cached, weight })
-  }
-  const irLen = irs[0]!.left.length
-  const blendL = new Float32Array(irLen)
-  const blendR = new Float32Array(irLen)
-  for (const { left, right, weight } of irs) {
-    for (let n = 0; n < irLen; n++) {
-      blendL[n] += weight * left[n]!
-      blendR[n] += weight * right[n]!
-    }
-  }
-  const leftBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
-  leftBuf.getChannelData(0).set(blendL)
-  const rightBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
-  rightBuf.getChannelData(0).set(blendR)
-  return { left: leftBuf, right: rightBuf }
-}
+): { left: AudioBuffer; right: AudioBuffer; idx: number } | null {
+  const idx = findNearest(set, az, el)
+  const key = `${subjectId}_${idx}_${ctx.sampleRate}`
 
-export async function getSofaHRIR(
-  ctx: AudioContext,
-  subjectId: string,
-  ourAzDeg: number,
-  ourElDeg: number,
-): Promise<{ left: AudioBuffer; right: AudioBuffer }> {
-  const set = await loadSofaSet(subjectId)
+  const bufHit = audioBufferCache.get(key)
+  if (bufHit) return { ...bufHit, idx }
 
-  // Blend the 4 nearest measured HRIRs weighted by angular proximity.
-  // This gives continuous IR morphing as the source moves rather than
-  // snapping to the nearest measurement every ~15°.
-  const nearest = findNearestN(set, ourAzDeg, ourElDeg, 4)
+  const floatHit = resampledCache.get(key)
+  if (!floatHit) return null
 
-  const resampledIRs = await Promise.all(
-    nearest.map(({ idx, weight }) =>
-      getResampledIR(ctx, set, subjectId, idx).then(ir => ({ ...ir, weight })),
-    ),
-  )
-
-  const irLen = resampledIRs[0]!.left.length
-  const blendedL = new Float32Array(irLen)
-  const blendedR = new Float32Array(irLen)
-  for (const { left, right, weight } of resampledIRs) {
-    for (let n = 0; n < irLen; n++) {
-      blendedL[n] += weight * left[n]!
-      blendedR[n] += weight * right[n]!
-    }
-  }
-
-  const leftBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
-  leftBuf.getChannelData(0).set(blendedL)
-  const rightBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
-  rightBuf.getChannelData(0).set(blendedR)
-  return { left: leftBuf, right: rightBuf }
+  const leftBuf = ctx.createBuffer(1, floatHit.left.length, ctx.sampleRate)
+  leftBuf.getChannelData(0).set(floatHit.left)
+  const rightBuf = ctx.createBuffer(1, floatHit.right.length, ctx.sampleRate)
+  rightBuf.getChannelData(0).set(floatHit.right)
+  const result = { left: leftBuf, right: rightBuf }
+  audioBufferCache.set(key, result)
+  return { ...result, idx }
 }
