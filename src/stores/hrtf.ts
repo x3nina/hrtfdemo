@@ -6,12 +6,15 @@ import { PROFILES, type HRTFProfile } from '@/audio/profiles'
 export const useHRTFStore = defineStore('hrtf', () => {
   const initialized = ref(false)
   const playing = ref(false)
-  const currentProfileId = ref('mit-kemar')
+  const currentProfileId = ref('browser-hrtf')
   const currentSourceId = ref<AudioSourceId>('pink-noise')
+  const uploadedFiles = ref<Array<{ id: string; name: string }>>([])
+  let fileIdCounter = 0
 
-  // Sound source spherical position (degrees)
+  // Sound source spherical position (degrees) + distance (meters)
   const sourceAz = ref(45)
   const sourceEl = ref(0)
+  const sourceDistance = ref(1)
 
   // Listener head orientation (yaw/pitch in degrees)
   const listenerYaw = ref(0)
@@ -26,7 +29,7 @@ export const useHRTFStore = defineStore('hrtf', () => {
     await hrtfEngine.init()
     initialized.value = true
     await hrtfEngine.setProfile(currentProfileId.value)
-    hrtfEngine.setSourcePosition(sourceAz.value, sourceEl.value)
+    hrtfEngine.setSourcePosition(sourceAz.value, sourceEl.value, sourceDistance.value)
   }
 
   async function startPlay() {
@@ -41,10 +44,11 @@ export const useHRTFStore = defineStore('hrtf', () => {
     playing.value = false
   }
 
-  function setSourcePosition(az: number, el: number) {
+  function setSourcePosition(az: number, el: number, distance?: number) {
     sourceAz.value = az
     sourceEl.value = el
-    hrtfEngine.setSourcePosition(az, el)
+    if (distance !== undefined) sourceDistance.value = distance
+    hrtfEngine.setSourcePosition(az, el, sourceDistance.value)
   }
 
   function setListenerOrientation(yaw: number, pitch: number) {
@@ -74,8 +78,16 @@ export const useHRTFStore = defineStore('hrtf', () => {
 
   async function loadFile(file: File) {
     if (!initialized.value) await initialize()
-    await hrtfEngine.loadFile(file)
-    await setSource('file')
+    const id = `file-${fileIdCounter++}` as AudioSourceId
+    await hrtfEngine.loadFile(file, id)
+    uploadedFiles.value.push({ id, name: file.name })
+    await setSource(id)
+  }
+
+  function removeUploadedFile(id: string) {
+    hrtfEngine.removeFile(id)
+    uploadedFiles.value = uploadedFiles.value.filter(f => f.id !== id)
+    if (currentSourceId.value === id) setSource('pink-noise')
   }
 
   return {
@@ -83,8 +95,10 @@ export const useHRTFStore = defineStore('hrtf', () => {
     playing,
     currentProfileId,
     currentSourceId,
+    uploadedFiles,
     sourceAz,
     sourceEl,
+    sourceDistance,
     listenerYaw,
     listenerPitch,
     profiles,
@@ -98,5 +112,6 @@ export const useHRTFStore = defineStore('hrtf', () => {
     setProfile,
     setSource,
     loadFile,
+    removeUploadedFile,
   }
 })

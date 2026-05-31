@@ -5,6 +5,9 @@ import * as THREE from 'three'
 const props = defineProps<{
   azimuth: number   // degrees, 0=front, 90=left
   elevation: number // degrees, 0=horizontal
+  distance?: number // meters, default 1
+  guessAzimuth?: number   // degrees — shows a guess marker when defined
+  guessElevation?: number
   interactive?: boolean
   bgColor?: string  // CSS hex color, e.g. '#e8e8e8'
 }>()
@@ -19,6 +22,9 @@ let renderer: THREE.WebGLRenderer
 let scene: THREE.Scene
 let camera: THREE.PerspectiveCamera
 let speakerMesh: THREE.Group
+let targetMarker: THREE.Mesh | null = null
+let guessMarker: THREE.Mesh | null = null
+let headMaterials: THREE.MeshStandardMaterial[] = []
 let animId: number
 let dragging = false
 let lastX = 0
@@ -26,7 +32,7 @@ let lastY = 0
 let localAz = props.azimuth
 let localEl = props.elevation
 
-const SPHERE_R = 1.55  // speaker orbit radius
+const SPHERE_R = 1.55  // reference orbit radius (at distance = 1 m)
 
 function azElToPos(azDeg: number, elDeg: number, r: number) {
   const az = (azDeg * Math.PI) / 180
@@ -42,6 +48,8 @@ function azElToPos(azDeg: number, elDeg: number, r: number) {
 function buildHead(scene: THREE.Scene) {
   const mat = new THREE.MeshStandardMaterial({ color: 0x4a5568, roughness: 0.6, metalness: 0.1 })
   const darkMat = new THREE.MeshStandardMaterial({ color: 0x2d3748, roughness: 0.8 })
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x1a202c })
+  headMaterials = [mat, darkMat, eyeMat]
 
   // Head
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.5, 48, 48), mat)
@@ -64,7 +72,6 @@ function buildHead(scene: THREE.Scene) {
 
   // Eyes (directional indicator)
   const eyeGeo = new THREE.SphereGeometry(0.06, 12, 12)
-  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x1a202c })
   ;[-0.17, 0.17].forEach((x) => {
     const eye = new THREE.Mesh(eyeGeo, eyeMat)
     eye.position.set(x, 0.06, -0.46)
@@ -76,6 +83,15 @@ function buildHead(scene: THREE.Scene) {
   nose.rotation.x = Math.PI / 2
   nose.position.set(0, -0.08, -0.5)
   scene.add(nose)
+}
+
+function setHeadOpacity(opacity: number) {
+  for (const mat of headMaterials) {
+    mat.transparent = opacity < 1
+    mat.opacity = opacity
+    mat.depthWrite = opacity >= 1
+    mat.needsUpdate = true
+  }
 }
 
 function buildSpeaker(): THREE.Group {
@@ -111,10 +127,25 @@ function buildSpeaker(): THREE.Group {
 
 function positionSpeaker(az: number, el: number) {
   if (!speakerMesh) return
-  const pos = azElToPos(az, el, SPHERE_R)
+  const d = Math.max(0.2, Math.min(6, props.distance ?? 1))
+  const r = SPHERE_R * d
+  const pos = azElToPos(az, el, r)
   speakerMesh.position.copy(pos)
-  // point toward center (head)
   speakerMesh.lookAt(0, 0, 0)
+  const s = Math.max(0.4, Math.min(2, 1 / Math.sqrt(d)))
+  speakerMesh.scale.setScalar(s)
+  // In reveal mode (guess visible), hide speaker so the target marker shows clearly
+  speakerMesh.visible = props.guessAzimuth === undefined
+  if (targetMarker) {
+    targetMarker.position.copy(azElToPos(az, el, SPHERE_R))
+    targetMarker.visible = props.guessAzimuth !== undefined
+  }
+}
+
+function positionGuessMarker(az: number, el: number) {
+  if (!guessMarker) return
+  guessMarker.position.copy(azElToPos(az, el, SPHERE_R))
+  guessMarker.visible = true
 }
 
 function init() {
@@ -129,8 +160,8 @@ function init() {
   const bgHex = props.bgColor ?? '#e8e8e8'
   scene.background = new THREE.Color(bgHex)
 
-  camera = new THREE.PerspectiveCamera(42, canvas.clientWidth / canvas.clientHeight, 0.1, 100)
-  camera.position.set(0, 0.6, 3.2)
+  camera = new THREE.PerspectiveCamera(52, canvas.clientWidth / canvas.clientHeight, 0.1, 100)
+  camera.position.set(0, 0.4, 4)
   camera.lookAt(0, 0, 0)
 
   // Lighting
@@ -144,9 +175,28 @@ function init() {
   scene.add(fill)
 
   buildHead(scene)
+  setHeadOpacity(props.guessAzimuth !== undefined ? 0.35 : 1)
   speakerMesh = buildSpeaker()
   scene.add(speakerMesh)
+
+  targetMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09, 16, 16),
+    new THREE.MeshStandardMaterial({ color: 0x27ae60, emissive: 0x1a7a42, emissiveIntensity: 0.4, roughness: 0.4 }),
+  )
+  targetMarker.visible = false
+  scene.add(targetMarker)
+
+  guessMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.09, 16, 16),
+    new THREE.MeshStandardMaterial({ color: 0x5c6bc0, emissive: 0x3d4fa0, emissiveIntensity: 0.4, roughness: 0.4 }),
+  )
+  guessMarker.visible = false
+  scene.add(guessMarker)
+
   positionSpeaker(localAz, localEl)
+  if (props.guessAzimuth !== undefined && props.guessElevation !== undefined) {
+    positionGuessMarker(props.guessAzimuth, props.guessElevation)
+  }
 
   // Faint orbit sphere wireframe
   const wires = new THREE.Mesh(
@@ -200,14 +250,22 @@ function onPointerUp(e: PointerEvent) {
   ;(e.target as HTMLElement).releasePointerCapture(e.pointerId)
 }
 
-// Sync external az/el when not in interactive drag
+// Sync external az/el/distance/guess when not in interactive drag
 watch(
-  () => [props.azimuth, props.elevation] as [number, number],
-  ([az, el]) => {
+  () => [props.azimuth, props.elevation, props.distance, props.guessAzimuth, props.guessElevation] as
+    [number, number, number | undefined, number | undefined, number | undefined],
+  ([az, el, , guessAz, guessEl]) => {
     if (!dragging) {
       localAz = az
       localEl = el
       positionSpeaker(az, el)
+    }
+    setHeadOpacity(guessAz !== undefined ? 0.35 : 1)
+    if (guessAz !== undefined && guessEl !== undefined) {
+      positionGuessMarker(guessAz, guessEl)
+    } else {
+      if (guessMarker) guessMarker.visible = false
+      if (targetMarker) targetMarker.visible = false
     }
   },
 )

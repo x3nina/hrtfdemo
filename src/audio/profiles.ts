@@ -16,12 +16,6 @@ const LISTEN_SUBJECTS = [
 
 export const PROFILES: HRTFProfile[] = [
   {
-    id: 'mit-kemar',
-    name: 'MIT KEMAR',
-    description: 'MIT KEMAR dummy head – real HRIR files, ConvolverNode',
-    available: true,
-  },
-  {
     id: 'browser-hrtf',
     name: 'Browser HRTF',
     description: 'Browser built-in HRTF (PannerNode, no files)',

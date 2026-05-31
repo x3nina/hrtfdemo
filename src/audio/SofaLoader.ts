@@ -90,21 +90,58 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
   return set
 }
 
-function findNearestInSet(set: SofaHRIRSet, ourAzDeg: number, ourElDeg: number): number {
+// Resampled IR cache — keyed by subjectId + measurement index + output sample rate.
+// Avoids re-running OfflineAudioContext for the same measurement on every call.
+const resampledCache = new Map<string, { left: Float32Array; right: Float32Array }>()
+
+async function getResampledIR(
+  ctx: AudioContext,
+  set: SofaHRIRSet,
+  subjectId: string,
+  idx: number,
+): Promise<{ left: Float32Array; right: Float32Array }> {
+  const key = `${subjectId}_${idx}_${ctx.sampleRate}`
+  const hit = resampledCache.get(key)
+  if (hit) return hit
+
+  const ir = set.irs[idx]!
+  const [resL, resR] = await Promise.all([
+    resampleIfNeeded(ctx, ir.left, set.sampleRate),
+    resampleIfNeeded(ctx, ir.right, set.sampleRate),
+  ])
+  const result = { left: resL, right: resR }
+  resampledCache.set(key, result)
+  return result
+}
+
+// Return the N nearest measurements with inverse-angular-distance weights.
+// dot^k weighting (k=8): at the midpoint between two 15°-spaced measurements
+// each gets ~50%; a measurement 30° away gets ~14% before normalisation.
+function findNearestN(
+  set: SofaHRIRSet,
+  ourAzDeg: number,
+  ourElDeg: number,
+  N: number,
+): Array<{ idx: number; weight: number }> {
   const az = (ourAzDeg * Math.PI) / 180
   const el = (ourElDeg * Math.PI) / 180
   const qx = -Math.sin(az) * Math.cos(el)
   const qy = Math.sin(el)
   const qz = -Math.cos(az) * Math.cos(el)
 
-  let bestIdx = 0
-  let bestDot = -Infinity
+  const scored: Array<{ idx: number; dot: number }> = []
   for (let i = 0; i < set.positions.length; i++) {
     const v = set.positions[i]!.vec
-    const dot = qx * v[0] + qy * v[1] + qz * v[2]
-    if (dot > bestDot) { bestDot = dot; bestIdx = i }
+    scored.push({ idx: i, dot: Math.max(0, qx * v[0] + qy * v[1] + qz * v[2]) })
   }
-  return bestIdx
+  scored.sort((a, b) => b.dot - a.dot)
+  const top = scored.slice(0, N)
+
+  const k = 8
+  const rawWeights = top.map(s => s.dot ** k)
+  const total = rawWeights.reduce((a, b) => a + b, 0)
+  if (total < 1e-10) return [{ idx: top[0]!.idx, weight: 1 }]
+  return top.map((s, j) => ({ idx: s.idx, weight: rawWeights[j]! / total }))
 }
 
 async function resampleIfNeeded(
@@ -132,18 +169,31 @@ export async function getSofaHRIR(
   ourElDeg: number,
 ): Promise<{ left: AudioBuffer; right: AudioBuffer }> {
   const set = await loadSofaSet(subjectId)
-  const idx = findNearestInSet(set, ourAzDeg, ourElDeg)
-  const ir = set.irs[idx]!
 
-  const [resL, resR] = await Promise.all([
-    resampleIfNeeded(ctx, ir.left, set.sampleRate),
-    resampleIfNeeded(ctx, ir.right, set.sampleRate),
-  ])
+  // Blend the 4 nearest measured HRIRs weighted by angular proximity.
+  // This gives continuous IR morphing as the source moves rather than
+  // snapping to the nearest measurement every ~15°.
+  const nearest = findNearestN(set, ourAzDeg, ourElDeg, 4)
 
-  const left = ctx.createBuffer(1, resL.length, ctx.sampleRate)
-  left.getChannelData(0).set(resL)
-  const right = ctx.createBuffer(1, resR.length, ctx.sampleRate)
-  right.getChannelData(0).set(resR)
+  const resampledIRs = await Promise.all(
+    nearest.map(({ idx, weight }) =>
+      getResampledIR(ctx, set, subjectId, idx).then(ir => ({ ...ir, weight })),
+    ),
+  )
 
-  return { left, right }
+  const irLen = resampledIRs[0]!.left.length
+  const blendedL = new Float32Array(irLen)
+  const blendedR = new Float32Array(irLen)
+  for (const { left, right, weight } of resampledIRs) {
+    for (let n = 0; n < irLen; n++) {
+      blendedL[n] += weight * left[n]!
+      blendedR[n] += weight * right[n]!
+    }
+  }
+
+  const leftBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
+  leftBuf.getChannelData(0).set(blendedL)
+  const rightBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
+  rightBuf.getChannelData(0).set(blendedR)
+  return { left: leftBuf, right: rightBuf }
 }

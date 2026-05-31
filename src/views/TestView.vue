@@ -3,22 +3,26 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import HeadScene from '@/components/HeadScene.vue'
 import { useHRTFStore } from '@/stores/hrtf'
-import { useThemeStore } from '@/stores/theme'
-import { AUDIO_SOURCES, type AudioSourceId } from '@/audio/HRTFEngine'
+import { AUDIO_SOURCES } from '@/audio/HRTFEngine'
 
 const router = useRouter()
 const hrtf = useHRTFStore()
-const themeStore = useThemeStore()
-
-const sceneBg = computed(() => themeStore.theme === 'dark' ? '#1e1e28' : '#e8e8ee')
+const sceneBg = '#1e1e28'
 
 const fileInputRef = ref<HTMLInputElement>()
 
 const azDisplay = computed(() => Math.round(((hrtf.sourceAz % 360) + 360) % 360))
 const elDisplay = computed(() => Math.round(hrtf.sourceEl))
+const distDisplay = computed(() => hrtf.sourceDistance.toFixed(1))
 
 function onSceneDrag(az: number, el: number) {
   hrtf.setSourcePosition(az, el)
+}
+
+function onWheel(e: WheelEvent) {
+  e.preventDefault()
+  const next = Math.max(0.5, Math.min(5, hrtf.sourceDistance * Math.exp(-e.deltaY * 0.001)))
+  hrtf.setSourcePosition(hrtf.sourceAz, hrtf.sourceEl, next)
 }
 
 async function togglePlay() {
@@ -29,12 +33,12 @@ async function togglePlay() {
   }
 }
 
-function selectSource(id: AudioSourceId) {
-  if (id === 'file') {
-    fileInputRef.value?.click()
-    return
-  }
-  hrtf.setSource(id)
+function selectSource(id: string) {
+  hrtf.setSource(id as never)
+}
+
+function openFilePicker() {
+  fileInputRef.value?.click()
 }
 
 async function onFileChange(e: Event) {
@@ -49,7 +53,10 @@ function onKey(e: KeyboardEvent) {
 }
 
 onMounted(() => window.addEventListener('keydown', onKey))
-onUnmounted(() => window.removeEventListener('keydown', onKey))
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKey)
+  hrtf.stopPlay()
+})
 </script>
 
 <template>
@@ -62,13 +69,27 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
         <h3 class="sidebar__heading">Audio source</h3>
         <ul class="source-list">
           <li
-            v-for="src in AUDIO_SOURCES"
+            v-for="src in AUDIO_SOURCES.filter(s => s.generated)"
             :key="src.id"
             class="source-list__item"
             :class="{ 'source-list__item--active': hrtf.currentSourceId === src.id }"
             @click="selectSource(src.id)"
           >
             {{ src.name }}
+          </li>
+          <li
+            v-for="f in hrtf.uploadedFiles"
+            :key="f.id"
+            class="source-list__item source-list__item--file"
+            :class="{ 'source-list__item--active': hrtf.currentSourceId === f.id }"
+            :title="f.name"
+            @click="selectSource(f.id)"
+          >
+            <span class="file-name">{{ f.name }}</span>
+            <button class="file-remove" title="Remove" @click.stop="hrtf.removeUploadedFile(f.id)">✕</button>
+          </li>
+          <li v-if="hrtf.uploadedFiles.length < 10" class="source-list__item source-list__item--load" @click="openFilePicker()">
+            Load file…
           </li>
         </ul>
         <input ref="fileInputRef" type="file" accept="audio/*" hidden @change="onFileChange" />
@@ -95,10 +116,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
     </aside>
 
     <!-- Main 3D area -->
-    <main class="main">
+    <main class="main" @wheel.prevent="onWheel">
       <HeadScene
         :azimuth="hrtf.sourceAz"
         :elevation="hrtf.sourceEl"
+        :distance="hrtf.sourceDistance"
         :interactive="true"
         :bg-color="sceneBg"
         @change="onSceneDrag"
@@ -111,6 +133,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
         <span class="pos-sep">·</span>
         <span class="pos-label">El</span>
         <span class="pos-val">{{ elDisplay }}°</span>
+        <span class="pos-sep">·</span>
+        <span class="pos-label">Dist</span>
+        <span class="pos-val">{{ distDisplay }}m</span>
       </div>
 
       <!-- Play / stop -->
@@ -198,6 +223,38 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   color: #5c6bc0;
   background: rgba(92, 107, 192, 0.1);
 }
+.source-list__item--file {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-remove {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 0.1rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  flex-shrink: 0;
+  font-family: inherit;
+}
+.source-list__item--file:hover .file-remove { display: block; }
+.file-remove:hover { color: #c0392b; }
+.source-list__item--load {
+  font-style: italic;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.source-list__item--load:hover { color: var(--text-secondary); }
 
 /* Profile list */
 .profile-list {
