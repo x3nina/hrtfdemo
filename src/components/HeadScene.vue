@@ -97,30 +97,37 @@ function setHeadOpacity(opacity: number) {
 function buildSpeaker(): THREE.Group {
   const g = new THREE.Group()
 
-  // Speaker body (cylinder)
-  const body = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.08, 0.06, 0.18, 20),
-    new THREE.MeshStandardMaterial({ color: 0x1a202c, roughness: 0.4, metalness: 0.6 }),
-  )
-  body.rotation.x = Math.PI / 2  // point along Z (toward head)
-  g.add(body)
+  // lookAt(0,0,0) makes local -Z face the head, so the speaker front must be at local -Z.
+  // ConeGeometry default: apex +Y, base -Y.
+  // rotation.x = PI/2 → apex at +Z (back), base at -Z (front facing head) ✓
 
-  // Cone/speaker grille
-  const cone = new THREE.Mesh(
-    new THREE.ConeGeometry(0.06, 0.1, 20),
-    new THREE.MeshStandardMaterial({ color: 0x2d3748, roughness: 0.7 }),
-  )
+  const cH = 0.11  // cone height; base at z = -cH/2, apex at z = +cH/2
+
+  const rimMat  = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.25 })
+  const coneMat = new THREE.MeshPhysicalMaterial({ color: 0x475569, roughness: 0.8, side: THREE.DoubleSide })
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.45, metalness: 0.55 })
+
+  // Speaker cone — open, base at -Z (front/head), apex at +Z (back)
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(0.19, -0.15, 32, 1, true), coneMat)
   cone.rotation.x = Math.PI / 2
-  cone.position.z = 0.14
   g.add(cone)
 
-  // Ring
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(0.08, 0.012, 8, 24),
-    new THREE.MeshStandardMaterial({ color: 0x4a5568, metalness: 0.8, roughness: 0.3 }),
+  // Dust cap at cone apex — small dome facing front through the open cone
+  const dustCap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 14, 10),
+    rimMat,
   )
-  ring.rotation.x = Math.PI / 2
-  g.add(ring)
+  // rotation.x = -PI/2 → dome tip points toward -Z (head/front) ✓
+  dustCap.rotation.x = -Math.PI / 2
+  dustCap.position.z = cH-0.16
+  g.add(dustCap)
+
+  // Compact housing cylinder behind the cone
+  const hD = 0.07
+  const housing = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.058, hD, 24), bodyMat)
+  housing.rotation.x = Math.PI / 2
+  housing.position.z = -0.07
+  g.add(housing)
 
   return g
 }
@@ -198,10 +205,10 @@ function init() {
     positionGuessMarker(props.guessAzimuth, props.guessElevation)
   }
 
-  // Faint orbit sphere wireframe
+  // orbit sphere wireframe
   const wires = new THREE.Mesh(
     new THREE.SphereGeometry(SPHERE_R, 24, 16),
-    new THREE.MeshBasicMaterial({ color: 0xcccccc, wireframe: true, transparent: true, opacity: 0.18 }),
+    new THREE.MeshBasicMaterial({ color: 0xcccccc, wireframe: true, transparent: true, opacity: 0.03 }),
   )
   scene.add(wires)
 
