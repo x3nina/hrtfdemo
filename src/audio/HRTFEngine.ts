@@ -1,7 +1,7 @@
 import {
   getSofaHRIR,
   prewarmResampledIRs,
-  tryBlendedBuffersSync,
+  tryNearestBuffersSync,
   loadSofaSet,
   type SofaHRIRSet,
 } from './SofaLoader'
@@ -28,10 +28,6 @@ interface ConvSlot {
   gain: GainNode
 }
 
-// 10ms: fast enough for 60fps tracking, long enough for a click-free buffer swap.
-// Buffer is always assigned while the slot's gain is 0, so no click occurs regardless
-// of crossfade length.
-const CROSSFADE_S = 0.010
 
 function sphericalToCartesian(azDeg: number, elDeg: number, r = 1) {
   const az = (azDeg * Math.PI) / 180
@@ -61,6 +57,7 @@ export class HRTFEngine {
   private sofaSet: SofaHRIRSet | null = null
   private sofaSubjectId: string | null = null
   private sofaGeneration = 0
+  private currentConvIdx = -1
 
   private source: AudioBufferSourceNode | null = null
   private fileBuffers = new Map<string, AudioBuffer>()
@@ -168,6 +165,7 @@ export class HRTFEngine {
 
   private activatePannerPath() {
     this.cacheWarm = false
+    this.currentConvIdx = -1
 
     if (this.mode === 'panner') return
 
@@ -190,6 +188,7 @@ export class HRTFEngine {
   private async activateConvolverPath(gen: number) {
     if (!this.ctx || !this.sofaSet || !this.sofaSubjectId) return
     this.cacheWarm = false
+    this.currentConvIdx = -1
 
     // Silence the slot immediately
     const t = this.ctx.currentTime
@@ -210,9 +209,7 @@ export class HRTFEngine {
       this.mode = 'convolver'
     }
 
-    // Load the initial blended IR for the current position. getSofaHRIR blends the
-    // 4 nearest measured IRs in the time domain — same result as tryBlendedBuffersSync
-    // but works before the cache is warm.
+    // Load the nearest measured IR for the current position before the cache is warm.
     const { az, el } = this.relativeDir()
     const initial = await getSofaHRIR(this.ctx, this.sofaSubjectId, az, el)
     if (this.sofaGeneration !== gen || this.mode !== 'convolver') return
@@ -263,10 +260,11 @@ export class HRTFEngine {
   private schedulePositionUpdate() {
     if (!this.ctx || !this.sofaSet || !this.sofaSubjectId || this.mode !== 'convolver' || !this.cacheWarm || !this.convSlot) return
     const { az, el } = this.relativeDir()
-    const blended = tryBlendedBuffersSync(this.ctx, this.sofaSet, this.sofaSubjectId, az, el, 4)
-    if (!blended) return
-    this.convSlot.convL.buffer = blended.left
-    this.convSlot.convR.buffer = blended.right
+    const result = tryNearestBuffersSync(this.ctx, this.sofaSet, this.sofaSubjectId, az, el)
+    if (!result || result.idx === this.currentConvIdx) return
+    this.currentConvIdx = result.idx
+    this.convSlot.convL.buffer = result.left
+    this.convSlot.convR.buffer = result.right
   }
 
   setSourcePosition(azDeg: number, elDeg: number, distance = 1) {
