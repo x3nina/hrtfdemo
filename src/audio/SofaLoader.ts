@@ -117,7 +117,7 @@ async function getResampledIR(
 // Return the N nearest measurements with inverse-angular-distance weights.
 // dot^k weighting (k=8): at the midpoint between two 15°-spaced measurements
 // each gets ~50%; a measurement 30° away gets ~14% before normalisation.
-function findNearestN(
+export function findNearestN(
   set: SofaHRIRSet,
   ourAzDeg: number,
   ourElDeg: number,
@@ -160,6 +160,21 @@ async function resampleIfNeeded(
   src.start()
   const rendered = await offline.startRendering()
   return rendered.getChannelData(0)
+}
+
+// Return AudioBuffers for a single measured HRIR (with resampling + caching).
+export async function getIRBuffers(
+  ctx: AudioContext,
+  set: SofaHRIRSet,
+  subjectId: string,
+  idx: number,
+): Promise<{ left: AudioBuffer; right: AudioBuffer }> {
+  const { left: resL, right: resR } = await getResampledIR(ctx, set, subjectId, idx)
+  const leftBuf = ctx.createBuffer(1, resL.length, ctx.sampleRate)
+  leftBuf.getChannelData(0).set(resL)
+  const rightBuf = ctx.createBuffer(1, resR.length, ctx.sampleRate)
+  rightBuf.getChannelData(0).set(resR)
+  return { left: leftBuf, right: rightBuf }
 }
 
 export async function getSofaHRIR(
