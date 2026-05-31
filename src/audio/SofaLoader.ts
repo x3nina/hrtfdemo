@@ -177,6 +177,54 @@ export async function getIRBuffers(
   return { left: leftBuf, right: rightBuf }
 }
 
+// Pre-loads every measurement's resampled IR into the cache. At matching sample
+// rates (44100→44100) this resolves in a few microtask ticks (no OfflineAudioContext
+// needed). Position updates become fully synchronous once this resolves.
+export async function prewarmResampledIRs(
+  ctx: AudioContext,
+  set: SofaHRIRSet,
+  subjectId: string,
+): Promise<void> {
+  await Promise.all(
+    Array.from({ length: set.positions.length }, (_, idx) =>
+      getResampledIR(ctx, set, subjectId, idx),
+    ),
+  )
+}
+
+// Returns a blended AudioBuffer pair if all N nearest IRs are already cached;
+// returns null (without throwing) if the cache is not yet warm.
+export function tryBlendedBuffersSync(
+  ctx: AudioContext,
+  set: SofaHRIRSet,
+  subjectId: string,
+  az: number,
+  el: number,
+  N: number,
+): { left: AudioBuffer; right: AudioBuffer } | null {
+  const nearest = findNearestN(set, az, el, N)
+  const irs: Array<{ left: Float32Array; right: Float32Array; weight: number }> = []
+  for (const { idx, weight } of nearest) {
+    const cached = resampledCache.get(`${subjectId}_${idx}_${ctx.sampleRate}`)
+    if (!cached) return null
+    irs.push({ ...cached, weight })
+  }
+  const irLen = irs[0]!.left.length
+  const blendL = new Float32Array(irLen)
+  const blendR = new Float32Array(irLen)
+  for (const { left, right, weight } of irs) {
+    for (let n = 0; n < irLen; n++) {
+      blendL[n] += weight * left[n]!
+      blendR[n] += weight * right[n]!
+    }
+  }
+  const leftBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
+  leftBuf.getChannelData(0).set(blendL)
+  const rightBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
+  rightBuf.getChannelData(0).set(blendR)
+  return { left: leftBuf, right: rightBuf }
+}
+
 export async function getSofaHRIR(
   ctx: AudioContext,
   subjectId: string,
