@@ -105,8 +105,30 @@ export class HRTFEngine {
 
     const l = this.ctx.listener
     l.positionX.value = 0; l.positionY.value = 0; l.positionZ.value = 0
-    l.forwardX.value = 0;  l.forwardY.value = 0;  l.forwardZ.value = -1
-    l.upX.value = 0;       l.upY.value = 1;       l.upZ.value = 0
+    this.applyListenerOrientation(0, 0, -1, 1)
+  }
+
+  // Firefox doesn't support AudioListener.forwardX/upX AudioParams — fall back to setOrientation().
+  private applyListenerOrientation(fx: number, fy: number, fz: number, upY: number) {
+    if (!this.ctx) return
+    const l = this.ctx.listener
+    if (l.forwardX !== undefined) {
+      l.forwardX.value = fx
+      l.forwardY.value = fy
+      l.forwardZ.value = fz
+      l.upX.value = 0
+      l.upY.value = upY
+      l.upZ.value = 0
+    } else {
+      ;(l as any).setOrientation(fx, fy, fz, 0, upY, 0)
+    }
+  }
+
+  // Call synchronously inside a user-gesture handler to unblock the AudioContext
+  // before any async work begins. Safe to call multiple times.
+  unlock() {
+    this.init()  // init() has no awaits — runs synchronously, sets this.ctx
+    if (this.ctx?.state === 'suspended') this.ctx.resume().catch(() => {})
   }
 
   async resume() {
@@ -289,12 +311,7 @@ export class HRTFEngine {
       const fx = Math.sin(yaw) * Math.cos(pitch)
       const fy = Math.sin(pitch)
       const fz = -Math.cos(yaw) * Math.cos(pitch)
-      this.ctx.listener.forwardX.value = fx
-      this.ctx.listener.forwardY.value = fy
-      this.ctx.listener.forwardZ.value = fz
-      this.ctx.listener.upX.value = 0
-      this.ctx.listener.upY.value = Math.cos(pitch)
-      this.ctx.listener.upZ.value = 0
+      this.applyListenerOrientation(fx, fy, fz, Math.cos(pitch))
     }
 
     if (this.mode === 'convolver') {

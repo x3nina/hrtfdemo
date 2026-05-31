@@ -32,6 +32,10 @@ export const useHRTFStore = defineStore('hrtf', () => {
     hrtfEngine.setSourcePosition(sourceAz.value, sourceEl.value, sourceDistance.value)
   }
 
+  function unlockAudio() {
+    hrtfEngine.unlock()
+  }
+
   async function startPlay() {
     if (!initialized.value) await initialize()
     await hrtfEngine.resume()
@@ -104,6 +108,7 @@ export const useHRTFStore = defineStore('hrtf', () => {
     profiles,
     currentProfile,
     initialize,
+    unlockAudio,
     startPlay,
     stopPlay,
     setSourcePosition,
