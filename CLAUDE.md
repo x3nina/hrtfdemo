@@ -22,25 +22,29 @@ No test suite exists in this project.
 
 `HRTFEngine.ts` owns the Web Audio API graph. It has two processing paths:
 - **PannerNode path** — browser built-in HRTF, no external data needed
-- **ConvolverNode path** — custom HRTF profiles loaded from files; uses dual convolver slots with 50ms crossfade to prevent clicks during IR morphing as the source position moves
+- **ConvolverNode path** — custom HRTF profiles loaded from SOFA files; uses a single convolver slot with direct IR buffer swaps on position update. Adjacent positions have nearly identical IRs so the swap is inaudible; a 2-slot crossfade was intentionally avoided because overlapping slightly-different IRs at the 60Hz update rate causes comb filtering.
 
-`SofaLoader.ts` loads IRCAM LISTEN SOFA files (`public/hrtf/listen/IRC_*.sofa`) via h5wasm. It implements 4-neighbor blending with inverse-angular-distance weighting (dot^8 kernel) for smooth spatial interpolation between measured positions.
-
-`KemarLoader.ts` loads MIT KEMAR compact binary files (`public/hrtf/kemar/elev{N}/H{N}e{AAA}a.dat`) — 128 int16 samples per ear, interleaved L/R, resampled to match the AudioContext rate at runtime.
+`SofaLoader.ts` loads IRCAM LISTEN SOFA files (`public/hrtf/listen/IRC_*.sofa`) via h5wasm. It finds the nearest measured position by maximum dot-product on the unit sphere. All IRs are pre-warmed into an `AudioBuffer` cache after profile load; once warm, every `setSourcePosition` call is fully synchronous with no async work.
 
 ### Coordinate Convention
 
-Azimuth 0° = front (−Z), 90° = left (−X), 180° = back, 270° = right. Elevation 0° = horizontal, +90° = above, −90° = below. Both loaders normalize to this convention.
+Azimuth 0° = front (−Z), 90° = left (−X), 180° = back, 270° = right. Elevation 0° = horizontal, +90° = above, −90° = below. Both `HRTFEngine` and `SofaLoader` use this convention; the SOFA files use the same convention natively (no remapping needed).
 
 ### State → Audio Bridge (`src/stores/`)
 
-`useHRTFStore` (`stores/hrtf.ts`) is the single bridge between Vue components and `HRTFEngine`. Components never call HRTFEngine directly — they call store actions (`setSourcePosition`, `setProfile`, `startPlay`, etc.) which delegate to the engine.
+`useHRTFStore` (`stores/hrtf.ts`) is the single bridge between Vue components and `HRTFEngine`. Components never call `HRTFEngine` directly — they call store actions (`setSourcePosition`, `setProfile`, `startPlay`, etc.) which delegate to the engine.
 
-`useGameStore` (`stores/game.ts`) manages game phase (menu → listening → submitted), target/guess positions, and angular distance scoring.
+`useGameStore` (`stores/game.ts`) manages game phase (`menu → listening → submitted`), target/guess positions, and angular distance scoring. It calls into `useHRTFStore`, never into `HRTFEngine` directly.
+
+### View Interaction Model
+
+The two views handle drag differently:
+- **TestView** — drag on `HeadScene` moves the *sound source* (az/el). Scroll wheel controls distance. Listener orientation is fixed at (0, 0).
+- **PlayView** (listening phase) — drag on the *view itself* rotates the *listener's head* (yaw/pitch) while the source stays fixed at a random position. The guess is derived from the accumulated yaw/pitch at submit time.
 
 ### 3D Visualization (`src/components/HeadScene.vue`)
 
-THREE.js scene with a procedural head model, a speaker indicator, and an orbit wireframe sphere (reference 1.55m). In interactive mode, mouse drag changes azimuth/elevation; scroll wheel changes distance. The component emits `change(az, el)` events — it does not write to the store directly.
+THREE.js scene with a procedural head model, a speaker indicator, and an orbit wireframe sphere (reference 1.55m radius). When `interactive=true`, pointer drag emits `change(az, el)` events — it does not write to the store directly. When `guessAzimuth` is defined (reveal phase), the speaker hides, a green target marker appears, and the head becomes semi-transparent.
 
 ### Styling
 

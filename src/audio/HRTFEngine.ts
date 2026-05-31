@@ -345,10 +345,6 @@ export class HRTFEngine {
     this.fileBuffers.delete(id)
   }
 
-  setVolume(v: number) {
-    if (this.gainNode) this.gainNode.gain.value = Math.max(0, Math.min(1, v))
-  }
-
   private buildBuffer(id: AudioSourceId): AudioBuffer | null {
     if (!this.ctx) return null
     switch (id) {
