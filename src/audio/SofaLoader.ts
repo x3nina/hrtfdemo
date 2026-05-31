@@ -91,6 +91,105 @@ const resampledCache = new Map<string, { left: Float32Array; right: Float32Array
 // AudioBuffer cache — same key, avoids re-allocating buffers on every 60fps position update.
 const audioBufferCache = new Map<string, { left: AudioBuffer; right: AudioBuffer }>()
 
+// --- Spectral blending utilities ---
+
+function nextPow2(n: number): number {
+  let p = 1
+  while (p < n) p <<= 1
+  return p
+}
+
+// In-place radix-2 Cooley-Tukey FFT.
+// forward=true → DFT: X[k] = Σ x[n] e^{-j2πkn/N}
+// forward=false → unnormalized IDFT: Σ X[k] e^{+j2πkn/N}  (divide output by N to recover x[n])
+function fftInPlace(re: Float64Array, im: Float64Array, forward: boolean): void {
+  const N = re.length
+  for (let i = 1, j = 0; i < N; i++) {
+    let bit = N >> 1
+    for (; j & bit; bit >>= 1) j ^= bit
+    j ^= bit
+    if (i < j) {
+      let t = re[i]!; re[i] = re[j]!; re[j] = t
+      t = im[i]!; im[i] = im[j]!; im[j] = t
+    }
+  }
+  const sign = forward ? -1 : 1
+  for (let len = 2; len <= N; len <<= 1) {
+    const half = len >> 1
+    const ang = (sign * 2 * Math.PI) / len
+    const wRe = Math.cos(ang), wIm = Math.sin(ang)
+    for (let i = 0; i < N; i += len) {
+      let uRe = 1, uIm = 0
+      for (let j = 0; j < half; j++) {
+        const aRe = re[i + j]!, aIm = im[i + j]!
+        const bRe = re[i + j + half]!, bIm = im[i + j + half]!
+        const tRe = uRe * bRe - uIm * bIm, tIm = uRe * bIm + uIm * bRe
+        re[i + j] = aRe + tRe; im[i + j] = aIm + tIm
+        re[i + j + half] = aRe - tRe; im[i + j + half] = aIm - tIm
+        const nu = uRe * wRe - uIm * wIm; uIm = uRe * wIm + uIm * wRe; uRe = nu
+      }
+    }
+  }
+}
+
+// Returns |X[k]| for k=0..fftSize-1 for a real input IR.
+function realMagnitudeSpectrum(ir: Float32Array, fftSize: number): Float64Array {
+  const re = new Float64Array(fftSize)
+  const im = new Float64Array(fftSize)
+  for (let i = 0; i < ir.length; i++) re[i] = ir[i]!
+  fftInPlace(re, im, true)
+  const mag = new Float64Array(fftSize)
+  for (let i = 0; i < fftSize; i++) mag[i] = Math.sqrt(re[i]! * re[i]! + im[i]! * im[i]!)
+  return mag
+}
+
+// Reconstruct a minimum-phase IR from an interpolated magnitude spectrum via real cepstrum:
+// log(mag) → IFFT → causal cepstral window → FFT → exp() → IFFT
+function minimumPhaseFromMagnitude(mag: Float64Array, irLen: number): Float32Array {
+  const N = mag.length
+  const EPS = 1e-10
+  const re = new Float64Array(N)
+  const im = new Float64Array(N)
+  for (let i = 0; i < N; i++) re[i] = Math.log(Math.max(mag[i]!, EPS))
+  fftInPlace(re, im, false) // → re[n] = N·c[n]  (real cepstrum × N, unnormalized)
+  // Causal lifter (÷N): n=0 → 1/N, 1≤n<N/2 → 2/N (fold conjugate half), n=N/2 → 1/N, rest → 0
+  re[0] = re[0]! / N; im[0] = 0
+  for (let n = 1; n < N / 2; n++) { re[n] = 2 * re[n]! / N; im[n] = 0 }
+  re[N / 2] = re[N / 2]! / N; im[N / 2] = 0
+  for (let n = N / 2 + 1; n < N; n++) { re[n] = 0; im[n] = 0 }
+  fftInPlace(re, im, true) // → log|H_min[k]| + j·φ_min[k]
+  for (let i = 0; i < N; i++) {
+    const amp = Math.exp(re[i]!)
+    re[i] = amp * Math.cos(im[i]!); im[i] = amp * Math.sin(im[i]!)
+  }
+  fftInPlace(re, im, false) // → N·h_min[n]
+  const result = new Float32Array(irLen)
+  for (let i = 0; i < irLen; i++) result[i] = re[i]! / N
+  return result
+}
+
+// Keyed by subjectId_idx_sampleRate — stores pre-computed FFT magnitude spectrum per measured IR.
+const magnitudeSpectraCache = new Map<string, { left: Float64Array; right: Float64Array }>()
+
+function getOrComputeMagnitudeSpectra(
+  subjectId: string,
+  idx: number,
+  sampleRate: number,
+  fftSize: number,
+): { left: Float64Array; right: Float64Array } | null {
+  const key = `${subjectId}_${idx}_${sampleRate}`
+  const hit = magnitudeSpectraCache.get(key)
+  if (hit) return hit
+  const ir = resampledCache.get(key)
+  if (!ir) return null
+  const result = {
+    left: realMagnitudeSpectrum(ir.left, fftSize),
+    right: realMagnitudeSpectrum(ir.right, fftSize),
+  }
+  magnitudeSpectraCache.set(key, result)
+  return result
+}
+
 async function getResampledIR(
   ctx: AudioContext,
   set: SofaHRIRSet,
@@ -161,6 +260,14 @@ export async function prewarmResampledIRs(
       getResampledIR(ctx, set, subjectId, idx),
     ),
   )
+  // Pre-compute FFT magnitude spectra so the first position update has no extra cost.
+  const firstIR = resampledCache.get(`${subjectId}_0_${ctx.sampleRate}`)
+  if (firstIR) {
+    const fftSize = nextPow2(firstIR.left.length)
+    for (let idx = 0; idx < set.positions.length; idx++) {
+      getOrComputeMagnitudeSpectra(subjectId, idx, ctx.sampleRate, fftSize)
+    }
+  }
 }
 
 async function getAudioBuffers(
@@ -227,8 +334,8 @@ export function findNeighbors(
   return top.map(({ idx }, i) => ({ idx, weight: raw[i]! / sum }))
 }
 
-// Sync blended lookup — weighted sum of k nearest IRs in the time domain.
-// Returns null if the resampled cache is not yet warm for any neighbor.
+// Sync blended lookup — interpolates magnitude spectra of k nearest IRs then reconstructs
+// a minimum-phase IR. Returns null if the resampled cache is not yet warm for any neighbor.
 export function tryBlendedBuffersSync(
   ctx: AudioContext,
   set: SofaHRIRSet,
@@ -238,26 +345,27 @@ export function tryBlendedBuffersSync(
 ): { left: AudioBuffer; right: AudioBuffer } | null {
   const neighbors = findNeighbors(set, az, el, 4)
 
-  const parts: Array<{ left: Float32Array; right: Float32Array; weight: number }> = []
-  for (const { idx, weight } of neighbors) {
-    const hit = resampledCache.get(`${subjectId}_${idx}_${ctx.sampleRate}`)
-    if (!hit) return null
-    parts.push({ left: hit.left, right: hit.right, weight })
-  }
+  const firstIR = resampledCache.get(`${subjectId}_${neighbors[0]!.idx}_${ctx.sampleRate}`)
+  if (!firstIR) return null
+  const irLen = firstIR.left.length
+  const fftSize = nextPow2(irLen)
 
-  const len = parts[0]!.left.length
-  const bL = new Float32Array(len)
-  const bR = new Float32Array(len)
-  for (const { left, right, weight } of parts) {
-    for (let n = 0; n < len; n++) {
-      bL[n] = (bL[n] ?? 0) + (left[n] ?? 0) * weight
-      bR[n] = (bR[n] ?? 0) + (right[n] ?? 0) * weight
+  const blendedMagL = new Float64Array(fftSize)
+  const blendedMagR = new Float64Array(fftSize)
+  for (const { idx, weight } of neighbors) {
+    const spectra = getOrComputeMagnitudeSpectra(subjectId, idx, ctx.sampleRate, fftSize)
+    if (!spectra) return null
+    for (let i = 0; i < fftSize; i++) {
+      blendedMagL[i] = blendedMagL[i]! + weight * spectra.left[i]!
+      blendedMagR[i] = blendedMagR[i]! + weight * spectra.right[i]!
     }
   }
 
-  const leftBuf = ctx.createBuffer(1, len, ctx.sampleRate)
+  const bL = minimumPhaseFromMagnitude(blendedMagL, irLen)
+  const bR = minimumPhaseFromMagnitude(blendedMagR, irLen)
+  const leftBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
   leftBuf.getChannelData(0).set(bL)
-  const rightBuf = ctx.createBuffer(1, len, ctx.sampleRate)
+  const rightBuf = ctx.createBuffer(1, irLen, ctx.sampleRate)
   rightBuf.getChannelData(0).set(bR)
   return { left: leftBuf, right: rightBuf }
 }
