@@ -3,16 +3,13 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useGameStore } from '@/stores/game'
 import { useHRTFStore } from '@/stores/hrtf'
-import { useThemeStore } from '@/stores/theme'
 import { PROFILES } from '@/audio/profiles'
 import HeadScene from '@/components/HeadScene.vue'
 
 const router = useRouter()
 const game = useGameStore()
 const hrtf = useHRTFStore()
-const themeStore = useThemeStore()
-
-const sceneBg = computed(() => themeStore.theme === 'dark' ? '#1e1e28' : '#e8e8ee')
+const sceneBg = '#1e1e28'
 
 // Mouse tracking for head rotation
 const isDragging = ref(false)
@@ -23,21 +20,21 @@ let accPitch = 0
 
 // Score display
 const scoreMsg = computed(() => {
-  const err = game.angularError
-  if (err === null) return ''
-  if (err < 5) return '★ Perfect!'
-  if (err < 15) return '◎ Excellent'
-  if (err < 30) return '◈ Good'
-  if (err < 60) return '◇ Fair'
+  const s = game.score
+  if (s === null) return ''
+  if (s < 5) return '★ Perfect!'
+  if (s < 15) return '◎ Excellent'
+  if (s < 30) return '◈ Good'
+  if (s < 60) return '◇ Fair'
   return '○ Keep practicing'
 })
 
 const errorColor = computed(() => {
-  const err = game.angularError ?? 180
-  if (err < 5) return '#2ecc71'
-  if (err < 15) return '#82e0aa'
-  if (err < 30) return '#f1c40f'
-  if (err < 60) return '#e67e22'
+  const s = game.score ?? 180
+  if (s < 5) return '#2ecc71'
+  if (s < 15) return '#82e0aa'
+  if (s < 30) return '#f1c40f'
+  if (s < 60) return '#e67e22'
   return '#e74c3c'
 })
 
@@ -50,7 +47,7 @@ function startGame() {
 
 function submitGuess() {
   if (game.phase !== 'listening') return
-  game.submitGuess()
+  game.submitGuess(accYaw, accPitch)
   hrtf.stopPlay()
 }
 
@@ -142,7 +139,7 @@ onUnmounted(() => {
           <kbd>Enter</kbd> to lock in your guess.
         </p>
         <div v-if="game.avgScore !== null" class="avg-score">
-          Average error: <strong>{{ Math.round(game.avgScore) }}°</strong>
+          Average distance: <strong>{{ Math.round(game.avgScore) }}°</strong>
           ({{ game.history.length }} round{{ game.history.length > 1 ? 's' : '' }})
         </div>
 
@@ -200,6 +197,8 @@ onUnmounted(() => {
           <HeadScene
             :azimuth="game.targetAz"
             :elevation="game.targetEl"
+            :guess-azimuth="game.guessAz"
+            :guess-elevation="game.guessEl"
             :interactive="false"
             :bg-color="sceneBg"
           />
@@ -218,9 +217,9 @@ onUnmounted(() => {
         <!-- Score panel -->
         <div class="score-panel">
           <div class="score-error" :style="{ color: errorColor }">
-            {{ Math.round(game.angularError ?? 0) }}°
+            {{ Math.round(game.score ?? 0) }}°
           </div>
-          <div class="score-label">angular error</div>
+          <div class="score-label">distance · lower is better</div>
           <div class="score-msg" :style="{ color: errorColor }">{{ scoreMsg }}</div>
 
           <table class="score-details">
@@ -230,8 +229,8 @@ onUnmounted(() => {
                 <td>Az {{ Math.round(game.targetAz) }}° · El {{ Math.round(game.targetEl) }}°</td>
               </tr>
               <tr>
-                <td>Your look</td>
-                <td>Yaw {{ Math.round(game.guessYaw) }}° · Pitch {{ Math.round(game.guessPitch) }}°</td>
+                <td>Guess</td>
+                <td>Az {{ Math.round(game.guessAz) }}° · El {{ Math.round(game.guessEl) }}°</td>
               </tr>
             </tbody>
           </table>

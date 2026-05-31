@@ -10,84 +10,70 @@ export const useGameStore = defineStore('game', () => {
   const phase = ref<GamePhase>('menu')
   const targetAz = ref(0)
   const targetEl = ref(0)
-  const guessYaw = ref(0)
-  const guessPitch = ref(0)
+  const guessAz = ref(0)
+  const guessEl = ref(0)
 
-  // Angular error of the last guess (degrees)
-  const angularError = ref<number | null>(null)
-  const history = ref<{ error: number; targetAz: number; targetEl: number }[]>([])
+  // Angular distance between guess and target (degrees) — lower is better
+  const score = ref<number | null>(null)
+  const history = ref<{ score: number; targetAz: number; targetEl: number }[]>([])
 
   const avgScore = computed(() => {
     if (!history.value.length) return null
-    const sum = history.value.reduce((a, b) => a + b.error, 0)
+    const sum = history.value.reduce((a, b) => a + b.score, 0)
     return sum / history.value.length
   })
 
   function startRound() {
-    // Random azimuth full 360°, elevation biased toward horizontal (-30 to +45)
     targetAz.value = Math.random() * 360
     targetEl.value = (Math.random() - 0.4) * 75
 
     hrtf.setSourcePosition(targetAz.value, targetEl.value)
     hrtf.resetListenerOrientation()
     phase.value = 'listening'
-    angularError.value = null
+    score.value = null
 
     hrtf.startPlay()
   }
 
-  function submitGuess() {
+  function submitGuess(yaw: number, pitch: number) {
     if (phase.value !== 'listening') return
-
-    guessYaw.value = hrtf.listenerYaw
-    guessPitch.value = hrtf.listenerPitch
     phase.value = 'submitted'
 
-    // Compute angular error between where they looked and where source is
-    // Convert both to unit vectors then compute acos(dot)
+    guessAz.value = ((-yaw) % 360 + 360) % 360
+    guessEl.value = pitch
+
+    // Angular distance: both vectors now use the same HRTF toVec convention.
     const toVec = (azDeg: number, elDeg: number) => {
       const az = (azDeg * Math.PI) / 180
       const el = (elDeg * Math.PI) / 180
-      return {
-        x: -Math.sin(az) * Math.cos(el),
-        y: Math.sin(el),
-        z: -Math.cos(az) * Math.cos(el),
-      }
+      return [
+        -Math.sin(az) * Math.cos(el),
+        Math.sin(el),
+        -Math.cos(az) * Math.cos(el),
+      ] as const
     }
 
-    // Guess direction: where they were looking (yaw/pitch → forward vector)
-    const yaw = (hrtf.listenerYaw * Math.PI) / 180
-    const pitch = (hrtf.listenerPitch * Math.PI) / 180
-    const gVec = {
-      x: Math.sin(yaw) * Math.cos(pitch),
-      y: Math.sin(pitch),
-      z: -Math.cos(yaw) * Math.cos(pitch),
-    }
+    const [gx, gy, gz] = toVec(guessAz.value, guessEl.value)
+    const [tx, ty, tz] = toVec(targetAz.value, targetEl.value)
+    const dot = Math.max(-1, Math.min(1, gx * tx + gy * ty + gz * tz))
+    score.value = (Math.acos(dot) * 180) / Math.PI
 
-    const tVec = toVec(targetAz.value, targetEl.value)
-    const dot = Math.max(-1, Math.min(1, gVec.x * tVec.x + gVec.y * tVec.y + gVec.z * tVec.z))
-    angularError.value = (Math.acos(dot) * 180) / Math.PI
-
-    history.value.push({
-      error: angularError.value,
-      targetAz: targetAz.value,
-      targetEl: targetEl.value,
-    })
+    history.value.push({ score: score.value, targetAz: targetAz.value, targetEl: targetEl.value })
   }
 
   function reset() {
     hrtf.stopPlay()
     phase.value = 'menu'
-    angularError.value = null
+    score.value = null
   }
 
   return {
     phase,
     targetAz,
     targetEl,
-    guessYaw,
-    guessPitch,
-    angularError,
+    guessAz,
+    guessEl,
+    score,
     history,
     avgScore,
     startRound,

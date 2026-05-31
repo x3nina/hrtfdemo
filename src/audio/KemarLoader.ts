@@ -6,6 +6,9 @@
 
 const KEMAR_SR = 44100
 const KEMAR_SAMPLES = 128
+// Raw KEMAR HRIRs have L2-norm ≈ 6.3 (after /32768), causing ~6x RMS amplification
+// and clipping that masks all spatial cues. Scale to bring output to a comfortable level.
+const KEMAR_GAIN = 0.15
 
 // Exact measured positions [el, azimuths[]] in KEMAR convention
 // el: degrees, azimuths: 0-180, increasing toward right
@@ -94,9 +97,10 @@ async function loadRaw(el: number, azFile: number): Promise<[Float32Array, Float
 
   const left = new Float32Array(KEMAR_SAMPLES)
   const right = new Float32Array(KEMAR_SAMPLES)
+  const scale = KEMAR_GAIN / 32768
   for (let i = 0; i < KEMAR_SAMPLES; i++) {
-    left[i] = (int16[i * 2]!) / 32768
-    right[i] = (int16[i * 2 + 1]!) / 32768
+    left[i] = (int16[i * 2]!) * scale
+    right[i] = (int16[i * 2 + 1]!) * scale
   }
 
   const pair: [Float32Array, Float32Array] = [left, right]
