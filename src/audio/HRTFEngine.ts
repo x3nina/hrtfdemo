@@ -6,7 +6,7 @@ import {
   type SofaHRIRSet,
 } from './SofaLoader'
 
-export type AudioSourceId = 'pink-noise' | 'white-noise' | 'tone-440' | 'tone-1k' | `file-${number}`
+export type AudioSourceId = 'pink-noise' | 'meow' | 'rain-and-thunder' | 'the-housebuilding-song' | `file-${number}`
 
 export interface AudioSource {
   id: AudioSourceId
@@ -16,9 +16,9 @@ export interface AudioSource {
 
 export const AUDIO_SOURCES: AudioSource[] = [
   { id: 'pink-noise', name: 'Pink Noise', generated: true },
-  { id: 'white-noise', name: 'White Noise', generated: true },
-  { id: 'tone-440', name: 'A4 (440 Hz)', generated: true },
-  { id: 'tone-1k', name: '1 kHz Tone', generated: true },
+  { id: 'meow', name: 'Meow', generated: true },
+  { id: 'rain-and-thunder', name: 'Rain and Thunder', generated: true },
+  { id: 'the-housebuilding-song', name: 'The Housebuilding Song', generated: true },
 ]
 
 interface ConvSlot {
@@ -116,6 +116,7 @@ export class HRTFEngine {
       ;(l as { setPosition(x: number, y: number, z: number): void }).setPosition(0, 0, 0)
     }
     this.applyListenerOrientation(0, 0, -1, 1)
+    await this.loadUrlSources()
   }
 
   // Firefox doesn't support AudioListener.forwardX/upX AudioParams — fall back to setOrientation().
@@ -352,9 +353,6 @@ export class HRTFEngine {
     if (!this.ctx) return null
     switch (id) {
       case 'pink-noise': return this.genPinkNoise(3)
-      case 'white-noise': return this.genWhiteNoise(3)
-      case 'tone-440': return this.genTone(440, 2)
-      case 'tone-1k': return this.genTone(1000, 2)
       default: return this.fileBuffers.get(id) ?? null
     }
   }
@@ -379,28 +377,19 @@ export class HRTFEngine {
     return buf
   }
 
-  private genWhiteNoise(duration: number): AudioBuffer {
-    const sr = this.ctx!.sampleRate
-    const len = sr * duration
-    const buf = this.ctx!.createBuffer(1, len, sr)
-    const data = buf.getChannelData(0)
-    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * 0.4
-    return buf
-  }
-
-  private genTone(freq: number, duration: number): AudioBuffer {
-    const sr = this.ctx!.sampleRate
-    const len = sr * duration
-    const buf = this.ctx!.createBuffer(1, len, sr)
-    const data = buf.getChannelData(0)
-    const fade = Math.floor(sr * 0.01)
-    for (let i = 0; i < len; i++) {
-      let amp = 0.4
-      if (i < fade) amp *= i / fade
-      if (i > len - fade) amp *= (len - i) / fade
-      data[i] = Math.sin((2 * Math.PI * freq * i) / sr) * amp
-    }
-    return buf
+  private async loadUrlSources() {
+    const sources: [AudioSourceId, string][] = [
+      ['meow', '/audio/Meow.mp3'],
+      ['rain-and-thunder', '/audio/Rain and Thunder.mp3'],
+      ['the-housebuilding-song', '/audio/The Housebuilding Song.mp3'],
+    ]
+    await Promise.all(
+      sources.map(async ([id, path]) => {
+        const res = await fetch(encodeURI(path))
+        const ab = await res.arrayBuffer()
+        this.fileBuffers.set(id, await this.ctx!.decodeAudioData(ab))
+      }),
+    )
   }
 }
 
