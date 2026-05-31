@@ -1,4 +1,4 @@
-import { getSofaHRIR } from './SofaLoader'
+import { findNearestN, loadSofaSet, getIRBuffers, type SofaHRIRSet } from './SofaLoader'
 
 export type AudioSourceId = 'pink-noise' | 'white-noise' | 'tone-440' | 'tone-1k' | `file-${number}`
 
@@ -15,14 +15,17 @@ export const AUDIO_SOURCES: AudioSource[] = [
   { id: 'tone-1k', name: '1 kHz Tone', generated: true },
 ]
 
-interface ConvSlot {
+interface InterpSlot {
   convL: ConvolverNode
   convR: ConvolverNode
   merger: ChannelMergerNode
   gain: GainNode
+  measurementIdx: number | null  // currently loaded measurement; null = empty slot
 }
 
-const CROSSFADE_S = 0.05 // 50 ms
+// 15 ms ramp: smooth enough to be inaudible, fast enough for 60 fps drag updates.
+const INTERP_RAMP_S = 0.015
+const N_SLOTS = 4
 
 function sphericalToCartesian(azDeg: number, elDeg: number, r = 1) {
   const az = (azDeg * Math.PI) / 180
@@ -41,13 +44,18 @@ export class HRTFEngine {
   // PannerNode path (browser built-in HRTF)
   private panner: PannerNode | null = null
 
-  // ConvolverNode path — two slots for crossfading
-  private slots: [ConvSlot, ConvSlot] | null = null
-  private convolverDistGain: GainNode | null = null  // inverse distance attenuation for convolver path
-  private activeSlot: 0 | 1 = 0
-  private fetchInFlight = false
-  private pendingPosition: { az: number; el: number } | null = null
-  private crossfadeEndTime = 0  // ctx time when the last scheduled crossfade finishes
+  // ConvolverNode path — N_SLOTS parallel slots, one IR per nearest measurement.
+  // Gains are updated synchronously on every position change; slots are swapped
+  // asynchronously only when the nearest-neighbor set changes.
+  private interpSlots: InterpSlot[] | null = null
+  private convolverDistGain: GainNode | null = null
+
+  private sofaSet: SofaHRIRSet | null = null
+  private sofaSubjectId: string | null = null
+  private sofaGeneration = 0  // incremented on profile switch to abort stale loads
+
+  private slotUpdateInFlight = false
+  private slotUpdatePending = false
 
   private source: AudioBufferSourceNode | null = null
   private fileBuffers = new Map<string, AudioBuffer>()
@@ -79,8 +87,8 @@ export class HRTFEngine {
     this.panner.coneOuterAngle = 0
     this.panner.coneOuterGain = 0
 
-    // Two convolver slots + shared distance-gain node
-    const makeSlot = (): ConvSlot => {
+    // N_SLOTS parallel convolver slots, all starting empty and silent
+    const makeSlot = (): InterpSlot => {
       const convL = this.ctx!.createConvolver(); convL.normalize = false
       const convR = this.ctx!.createConvolver(); convR.normalize = false
       const merger = this.ctx!.createChannelMerger(2)
@@ -88,17 +96,13 @@ export class HRTFEngine {
       convL.connect(merger, 0, 0)
       convR.connect(merger, 0, 1)
       merger.connect(gain)
-      return { convL, convR, merger, gain }
+      gain.gain.value = 0
+      return { convL, convR, merger, gain, measurementIdx: null }
     }
-    this.slots = [makeSlot(), makeSlot()]
-    this.slots[0].gain.gain.value = 1
-    this.slots[1].gain.gain.value = 0
+    this.interpSlots = Array.from({ length: N_SLOTS }, makeSlot)
 
     this.convolverDistGain = this.ctx.createGain()
     this.convolverDistGain.gain.value = 1
-    // convolverDistGain is wired into the graph when convolver path is active:
-    //   slots[*].gain → convolverDistGain → gainNode
-    // Not connected yet — panner path is default.
 
     // Default: panner path active
     this.panner.connect(this.gainNode)
@@ -124,10 +128,8 @@ export class HRTFEngine {
     }
   }
 
-  // Call synchronously inside a user-gesture handler to unblock the AudioContext
-  // before any async work begins. Safe to call multiple times.
   unlock() {
-    this.init()  // init() has no awaits — runs synchronously, sets this.ctx
+    this.init()
     if (this.ctx?.state === 'suspended') this.ctx.resume().catch(() => {})
   }
 
@@ -138,31 +140,36 @@ export class HRTFEngine {
   async setProfile(id: string) {
     if (!this.ctx) await this.init()
     this.profileId = id
+    this.sofaGeneration++
 
     if (id === 'browser-hrtf') {
+      this.sofaSet = null
+      this.sofaSubjectId = null
       this.activatePannerPath()
     } else {
+      const match = id.match(/^listen-(\d+)$/)
+      if (match) {
+        const subjectId = match[1]!
+        this.sofaSet = await loadSofaSet(subjectId)
+        this.sofaSubjectId = subjectId
+      }
       this.activateConvolverPath()
-      await this.updateConvolverBuffers()
+      this.updateConvolverWeights()
     }
   }
 
   private activatePannerPath() {
     if (this.mode === 'panner') return
-    // Sync panner position in case it moved while in convolver mode
     const { x, y, z } = sphericalToCartesian(this.currentAz, this.currentEl, this.currentDistance)
     this.panner!.positionX.value = x
     this.panner!.positionY.value = y
     this.panner!.positionZ.value = z
-    // Connect new path before tearing down old — no audio gap
     this.panner!.connect(this.gainNode!)
     if (this.source) this.source.connect(this.panner!)
-    // Tear down convolver path
     this.convolverDistGain!.disconnect()
-    this.slots![0].gain.disconnect()
-    this.slots![1].gain.disconnect()
+    for (const slot of this.interpSlots!) slot.gain.disconnect()
     if (this.source) {
-      for (const slot of this.slots!) {
+      for (const slot of this.interpSlots!) {
         try { this.source.disconnect(slot.convL) } catch {}
         try { this.source.disconnect(slot.convR) } catch {}
       }
@@ -172,19 +179,21 @@ export class HRTFEngine {
 
   private activateConvolverPath() {
     if (this.mode === 'convolver') return
-    // Apply distance attenuation: inverse model, no boost below refDistance=1
     this.convolverDistGain!.gain.value = 1 / Math.max(1, this.currentDistance)
-    // Connect new path before tearing down old — no audio gap
-    this.slots![0].gain.connect(this.convolverDistGain!)
-    this.slots![1].gain.connect(this.convolverDistGain!)
+    const t = this.ctx!.currentTime
+    for (const slot of this.interpSlots!) {
+      slot.measurementIdx = null
+      slot.gain.gain.cancelScheduledValues(t)
+      slot.gain.gain.setValueAtTime(0, t)
+      slot.gain.connect(this.convolverDistGain!)
+    }
     this.convolverDistGain!.connect(this.gainNode!)
     if (this.source) {
-      for (const slot of this.slots!) {
+      for (const slot of this.interpSlots!) {
         this.source.connect(slot.convL)
         this.source.connect(slot.convR)
       }
     }
-    // Tear down panner path
     this.panner!.disconnect()
     if (this.source) {
       try { this.source.disconnect(this.panner!) } catch {}
@@ -219,69 +228,94 @@ export class HRTFEngine {
     return { az: azDeg, el: elDeg }
   }
 
-  private async updateConvolverBuffers() {
-    if (!this.ctx || this.mode !== 'convolver') return
+  // Synchronously ramps each loaded slot's gain to its new interpolation weight.
+  // For position changes within the same 4-neighbor zone this is all that's needed —
+  // no async work, no latency. Triggers a background slot swap only when the
+  // nearest-neighbor set has changed.
+  private updateConvolverWeights() {
+    if (!this.ctx || !this.sofaSet || !this.interpSlots || this.mode !== 'convolver') return
     const { az, el } = this.relativeDir()
+    const neighbors = findNearestN(this.sofaSet, az, el, N_SLOTS)
+    const t = this.ctx.currentTime
 
-    if (this.fetchInFlight) {
-      this.pendingPosition = { az, el }
-      return
+    for (const slot of this.interpSlots) {
+      if (slot.measurementIdx === null) continue
+      const neighbor = neighbors.find(n => n.idx === slot.measurementIdx)
+      const targetWeight = neighbor?.weight ?? 0
+      slot.gain.gain.cancelScheduledValues(t)
+      slot.gain.gain.setValueAtTime(slot.gain.gain.value, t)
+      slot.gain.gain.linearRampToValueAtTime(targetWeight, t + INTERP_RAMP_S)
     }
 
-    await this.doFetchAndCrossfade(az, el)
+    this.scheduleSlotUpdate()
   }
 
-  private async doFetchAndCrossfade(az: number, el: number) {
-    if (!this.ctx || !this.slots) return
-    this.fetchInFlight = true
+  private scheduleSlotUpdate() {
+    if (this.slotUpdateInFlight) {
+      this.slotUpdatePending = true
+      return
+    }
+    void this.doSlotUpdate()
+  }
+
+  private async doSlotUpdate() {
+    this.slotUpdateInFlight = true
     try {
-      const { left, right } = await this.fetchHRIR(az, el)
-      if (this.mode !== 'convolver') return
-
-      // If a previous crossfade is still in progress, wait for it to finish.
-      // This prevents swapping the buffer of a slot that still has audible gain.
-      const waitMs = (this.crossfadeEndTime - this.ctx.currentTime) * 1000
-      if (waitMs > 1) await new Promise<void>(r => setTimeout(r, waitMs))
-
-      const t = this.ctx.currentTime
-      const nextSlot = (1 - this.activeSlot) as 0 | 1
-      const incoming = this.slots[nextSlot]
-      const outgoing = this.slots[this.activeSlot]
-
-      // Hard-zero incoming before swapping its buffer — even a tiny residual
-      // gain causes an audible click when the ConvolverNode IR changes.
-      incoming.gain.gain.cancelScheduledValues(t)
-      incoming.gain.gain.setValueAtTime(0, t)
-
-      incoming.convL.buffer = left
-      incoming.convR.buffer = right
-
-      outgoing.gain.gain.cancelScheduledValues(t)
-      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, t)
-      outgoing.gain.gain.linearRampToValueAtTime(0, t + CROSSFADE_S)
-      incoming.gain.gain.linearRampToValueAtTime(1, t + CROSSFADE_S)
-
-      this.crossfadeEndTime = t + CROSSFADE_S
-      this.activeSlot = nextSlot
+      await this.performSlotUpdates()
     } catch (e) {
-      console.error('HRIR load failed:', e)
+      console.error('HRTF slot update failed:', e)
     } finally {
-      this.fetchInFlight = false
-      if (this.pendingPosition) {
-        const pos = this.pendingPosition
-        this.pendingPosition = null
-        await this.doFetchAndCrossfade(pos.az, pos.el)
+      this.slotUpdateInFlight = false
+      if (this.slotUpdatePending) {
+        this.slotUpdatePending = false
+        void this.doSlotUpdate()
       }
     }
   }
 
-  private async fetchHRIR(az: number, el: number) {
-    const ctx = this.ctx!
-    const match = this.profileId.match(/^listen-(\d+)$/)
-    if (match) {
-      return getSofaHRIR(ctx, match[1]!, az, el)
+  // Loads any new measurements into free or fading-out slots. Runs serially so
+  // each slot assignment is committed before the next iteration looks for a free one.
+  private async performSlotUpdates() {
+    const gen = this.sofaGeneration
+    if (!this.ctx || !this.sofaSet || !this.interpSlots || this.mode !== 'convolver') return
+    const { az, el } = this.relativeDir()
+    const neighbors = findNearestN(this.sofaSet, az, el, N_SLOTS)
+    const newIdxSet = new Set(neighbors.map(n => n.idx))
+
+    for (const { idx } of neighbors) {
+      if (this.sofaGeneration !== gen) return
+      if (this.interpSlots.some(s => s.measurementIdx === idx)) continue
+
+      // Prefer a null (empty) slot; fall back to one that's fading out
+      const targetSlot =
+        this.interpSlots.find(s => s.measurementIdx === null) ??
+        this.interpSlots.find(s => s.measurementIdx !== null && !newIdxSet.has(s.measurementIdx))
+      if (!targetSlot) continue
+
+      // If the slot still holds a departing measurement, wait for the gain ramp to finish
+      if (targetSlot.measurementIdx !== null) {
+        await new Promise<void>(r => setTimeout(r, INTERP_RAMP_S * 1000 + 5))
+        if (this.sofaGeneration !== gen || this.mode !== 'convolver') return
+      }
+
+      const { left, right } = await getIRBuffers(this.ctx, this.sofaSet, this.sofaSubjectId!, idx)
+      if (this.sofaGeneration !== gen || this.mode !== 'convolver') return
+
+      // Swap buffer while gain is 0 — no click
+      const now = this.ctx.currentTime
+      targetSlot.gain.gain.cancelScheduledValues(now)
+      targetSlot.gain.gain.setValueAtTime(0, now)
+      targetSlot.convL.buffer = left
+      targetSlot.convR.buffer = right
+      targetSlot.measurementIdx = idx
+
+      // Fade in to the current weight (position may have shifted since the load started)
+      const { az: la, el: le } = this.relativeDir()
+      const currentWeight = findNearestN(this.sofaSet, la, le, N_SLOTS).find(n => n.idx === idx)?.weight ?? 0
+      if (currentWeight > 0.001) {
+        targetSlot.gain.gain.linearRampToValueAtTime(currentWeight, now + INTERP_RAMP_S)
+      }
     }
-    throw new Error(`Unknown profile: ${this.profileId}`)
   }
 
   setSourcePosition(azDeg: number, elDeg: number, distance = 1) {
@@ -297,7 +331,7 @@ export class HRTFEngine {
     } else if (this.mode === 'convolver') {
       if (this.convolverDistGain)
         this.convolverDistGain.gain.value = 1 / Math.max(1, distance)
-      this.updateConvolverBuffers()
+      this.updateConvolverWeights()
     }
   }
 
@@ -315,7 +349,7 @@ export class HRTFEngine {
     }
 
     if (this.mode === 'convolver') {
-      this.updateConvolverBuffers()
+      this.updateConvolverWeights()
     }
   }
 
@@ -333,7 +367,7 @@ export class HRTFEngine {
     if (this.mode === 'panner') {
       this.source.connect(this.panner!)
     } else {
-      for (const slot of this.slots!) {
+      for (const slot of this.interpSlots!) {
         this.source.connect(slot.convL)
         this.source.connect(slot.convR)
       }
