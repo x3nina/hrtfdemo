@@ -13,7 +13,7 @@ export const useGameStore = defineStore('game', () => {
   const guessAz = ref(0)
   const guessEl = ref(0)
 
-  // Angular distance between guess and target (degrees) — lower is better
+  
   const score = ref<number | null>(null)
   const history = ref<{ score: number; targetAz: number; targetEl: number }[]>([])
 
