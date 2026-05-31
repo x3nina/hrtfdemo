@@ -1,7 +1,7 @@
 import {
   getSofaHRIR,
   prewarmResampledIRs,
-  tryNearestBuffersSync,
+  tryBlendedBuffersSync,
   loadSofaSet,
   type SofaHRIRSet,
 } from './SofaLoader'
@@ -46,18 +46,15 @@ export class HRTFEngine {
   // PannerNode path (browser built-in HRTF)
   private panner: PannerNode | null = null
 
-  // ConvolverNode path — single slot, direct IR swap per position update.
-  // Adjacent positions have nearly identical IRs so the buffer swap is inaudible.
-  // A 2-slot crossfade would overlap two convolvers with slightly different IRs,
-  // creating comb filtering at the frame-update rate (60Hz buzz).
-  private convSlot: ConvSlot | null = null
+  // ConvolverNode path — two slots with 10ms crossfade + 4-neighbor IR blending.
+  private convSlots: [ConvSlot, ConvSlot] | null = null
+  private activeSlot = 0
   private convolverDistGain: GainNode | null = null
   private cacheWarm = false
 
   private sofaSet: SofaHRIRSet | null = null
   private sofaSubjectId: string | null = null
   private sofaGeneration = 0
-  private currentConvIdx = -1
 
   private source: AudioBufferSourceNode | null = null
   private fileBuffers = new Map<string, AudioBuffer>()
@@ -89,7 +86,7 @@ export class HRTFEngine {
     this.panner.coneOuterAngle = 0
     this.panner.coneOuterGain = 0
 
-    // ConvolverNode path — single slot, direct IR swap
+    // ConvolverNode path — two slots for crossfading
     const makeSlot = (): ConvSlot => {
       const convL = this.ctx!.createConvolver(); convL.normalize = false
       const convR = this.ctx!.createConvolver(); convR.normalize = false
@@ -101,7 +98,7 @@ export class HRTFEngine {
       gain.gain.value = 0
       return { convL, convR, merger, gain }
     }
-    this.convSlot = makeSlot()
+    this.convSlots = [makeSlot(), makeSlot()]
 
     this.convolverDistGain = this.ctx.createGain()
     this.convolverDistGain.gain.value = 1
@@ -166,7 +163,6 @@ export class HRTFEngine {
 
   private activatePannerPath() {
     this.cacheWarm = false
-    this.currentConvIdx = -1
 
     if (this.mode === 'panner') return
 
@@ -178,10 +174,12 @@ export class HRTFEngine {
     if (this.source) this.source.connect(this.panner!)
 
     try { this.convolverDistGain!.disconnect() } catch {}
-    try { this.convSlot!.gain.disconnect() } catch {}
-    if (this.source) {
-      try { this.source.disconnect(this.convSlot!.convL) } catch {}
-      try { this.source.disconnect(this.convSlot!.convR) } catch {}
+    for (const slot of this.convSlots!) {
+      try { slot.gain.disconnect() } catch {}
+      if (this.source) {
+        try { this.source.disconnect(slot.convL) } catch {}
+        try { this.source.disconnect(slot.convR) } catch {}
+      }
     }
     this.mode = 'panner'
   }
@@ -189,41 +187,44 @@ export class HRTFEngine {
   private async activateConvolverPath(gen: number) {
     if (!this.ctx || !this.sofaSet || !this.sofaSubjectId) return
     this.cacheWarm = false
-    this.currentConvIdx = -1
+    this.activeSlot = 0
 
-    // Silence the slot immediately
+    // Silence both slots immediately
     const t = this.ctx.currentTime
-    this.convSlot!.gain.gain.cancelScheduledValues(t)
-    this.convSlot!.gain.gain.setValueAtTime(0, t)
-    this.convSlot!.convL.buffer = null
-    this.convSlot!.convR.buffer = null
+    for (const slot of this.convSlots!) {
+      slot.gain.gain.cancelScheduledValues(t)
+      slot.gain.gain.setValueAtTime(0, t)
+      slot.convL.buffer = null
+      slot.convR.buffer = null
+    }
 
     if (this.mode !== 'convolver') {
       try { this.panner!.disconnect() } catch {}
       if (this.source) { try { this.source.disconnect(this.panner!) } catch {} }
-      this.convSlot!.gain.connect(this.convolverDistGain!)
-      this.convolverDistGain!.connect(this.gainNode!)
-      if (this.source) {
-        this.source.connect(this.convSlot!.convL)
-        this.source.connect(this.convSlot!.convR)
+      for (const slot of this.convSlots!) {
+        slot.gain.connect(this.convolverDistGain!)
+        if (this.source) {
+          this.source.connect(slot.convL)
+          this.source.connect(slot.convR)
+        }
       }
+      this.convolverDistGain!.connect(this.gainNode!)
       this.mode = 'convolver'
     }
 
-    // Load the nearest measured IR for the current position before the cache is warm.
+    // Load nearest IR into slot 0 before cache is warm
     const { az, el } = this.relativeDir()
     const initial = await getSofaHRIR(this.ctx, this.sofaSubjectId, az, el)
     if (this.sofaGeneration !== gen || this.mode !== 'convolver') return
 
-    this.convSlot!.convL.buffer = initial.left
-    this.convSlot!.convR.buffer = initial.right
+    const slot0 = this.convSlots![0]
+    slot0.convL.buffer = initial.left
+    slot0.convR.buffer = initial.right
     const now = this.ctx.currentTime
-    this.convSlot!.gain.gain.cancelScheduledValues(now)
-    this.convSlot!.gain.gain.setValueAtTime(1, now)
+    slot0.gain.gain.cancelScheduledValues(now)
+    slot0.gain.gain.setValueAtTime(1, now)
 
-    // Pre-warm all IRs. At 44100Hz (matching LISTEN sample rate) this resolves in
-    // a few microtask ticks since resampleIfNeeded is a no-op. Once warm, every
-    // position update becomes a synchronous IR blend with no async work.
+    // Pre-warm all IRs. Once warm, position updates use synchronous IR blending.
     const ctx = this.ctx, set = this.sofaSet, subjectId = this.sofaSubjectId
     void prewarmResampledIRs(ctx, set, subjectId).then(() => {
       if (this.sofaGeneration !== gen || this.mode !== 'convolver') return
@@ -259,13 +260,28 @@ export class HRTFEngine {
   }
 
   private schedulePositionUpdate() {
-    if (!this.ctx || !this.sofaSet || !this.sofaSubjectId || this.mode !== 'convolver' || !this.cacheWarm || !this.convSlot) return
+    if (!this.ctx || !this.sofaSet || !this.sofaSubjectId || this.mode !== 'convolver' || !this.cacheWarm || !this.convSlots) return
     const { az, el } = this.relativeDir()
-    const result = tryNearestBuffersSync(this.ctx, this.sofaSet, this.sofaSubjectId, az, el)
-    if (!result || result.idx === this.currentConvIdx) return
-    this.currentConvIdx = result.idx
-    this.convSlot.convL.buffer = result.left
-    this.convSlot.convR.buffer = result.right
+    const blended = tryBlendedBuffersSync(this.ctx, this.sofaSet, this.sofaSubjectId, az, el)
+    if (!blended) return
+
+    const nextSlot = 1 - this.activeSlot
+    const activeNode = this.convSlots[this.activeSlot]!
+    const nextNode = this.convSlots[nextSlot]!
+
+    nextNode.convL.buffer = blended.left
+    nextNode.convR.buffer = blended.right
+
+    const t = this.ctx.currentTime
+    const fade = 0.010
+    activeNode.gain.gain.cancelScheduledValues(t)
+    activeNode.gain.gain.setValueAtTime(activeNode.gain.gain.value, t)
+    activeNode.gain.gain.linearRampToValueAtTime(0, t + fade)
+    nextNode.gain.gain.cancelScheduledValues(t)
+    nextNode.gain.gain.setValueAtTime(0, t)
+    nextNode.gain.gain.linearRampToValueAtTime(1, t + fade)
+
+    this.activeSlot = nextSlot
   }
 
   setSourcePosition(azDeg: number, elDeg: number, distance = 1) {
@@ -315,8 +331,10 @@ export class HRTFEngine {
     if (this.mode === 'panner') {
       this.source.connect(this.panner!)
     } else {
-      this.source.connect(this.convSlot!.convL)
-      this.source.connect(this.convSlot!.convR)
+      for (const slot of this.convSlots!) {
+        this.source.connect(slot.convL)
+        this.source.connect(slot.convR)
+      }
     }
 
     this.source.start()
