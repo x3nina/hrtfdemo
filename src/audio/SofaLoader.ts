@@ -194,30 +194,70 @@ export async function getSofaHRIR(
   return getAudioBuffers(ctx, set, subjectId, idx)
 }
 
-// Sync lookup — returns the nearest IR's AudioBuffers plus the measurement index.
-// Returns null if the cache is not yet warm. After prewarmResampledIRs resolves,
-// this always succeeds. Callers can use the returned idx to skip redundant swaps.
-export function tryNearestBuffersSync(
+// Find k nearest measured positions, weighted by dot^8, normalized to sum to 1.
+export function findNeighbors(
+  set: SofaHRIRSet,
+  azDeg: number,
+  elDeg: number,
+  k = 4,
+): Array<{ idx: number; weight: number }> {
+  const az = (azDeg * Math.PI) / 180
+  const el = (elDeg * Math.PI) / 180
+  const qx = -Math.sin(az) * Math.cos(el)
+  const qy = Math.sin(el)
+  const qz = -Math.cos(az) * Math.cos(el)
+
+  const scored: Array<{ idx: number; dot: number }> = Array.from(
+    { length: set.positions.length },
+    (_, i) => {
+      const v = set.positions[i]!.vec
+      return { idx: i, dot: qx * v[0] + qy * v[1] + qz * v[2] }
+    },
+  )
+  scored.sort((a, b) => b.dot - a.dot)
+  const top = scored.slice(0, k)
+
+  let sum = 0
+  const raw = top.map(({ dot }) => {
+    const w = Math.pow(Math.max(0, dot), 8)
+    sum += w
+    return w
+  })
+  if (sum === 0) return top.map(({ idx }) => ({ idx, weight: 1 / k }))
+  return top.map(({ idx }, i) => ({ idx, weight: raw[i]! / sum }))
+}
+
+// Sync blended lookup — weighted sum of k nearest IRs in the time domain.
+// Returns null if the resampled cache is not yet warm for any neighbor.
+export function tryBlendedBuffersSync(
   ctx: AudioContext,
   set: SofaHRIRSet,
   subjectId: string,
   az: number,
   el: number,
-): { left: AudioBuffer; right: AudioBuffer; idx: number } | null {
-  const idx = findNearest(set, az, el)
-  const key = `${subjectId}_${idx}_${ctx.sampleRate}`
+): { left: AudioBuffer; right: AudioBuffer } | null {
+  const neighbors = findNeighbors(set, az, el, 4)
 
-  const bufHit = audioBufferCache.get(key)
-  if (bufHit) return { ...bufHit, idx }
+  const parts: Array<{ left: Float32Array; right: Float32Array; weight: number }> = []
+  for (const { idx, weight } of neighbors) {
+    const hit = resampledCache.get(`${subjectId}_${idx}_${ctx.sampleRate}`)
+    if (!hit) return null
+    parts.push({ left: hit.left, right: hit.right, weight })
+  }
 
-  const floatHit = resampledCache.get(key)
-  if (!floatHit) return null
+  const len = parts[0]!.left.length
+  const bL = new Float32Array(len)
+  const bR = new Float32Array(len)
+  for (const { left, right, weight } of parts) {
+    for (let n = 0; n < len; n++) {
+      bL[n] = (bL[n] ?? 0) + (left[n] ?? 0) * weight
+      bR[n] = (bR[n] ?? 0) + (right[n] ?? 0) * weight
+    }
+  }
 
-  const leftBuf = ctx.createBuffer(1, floatHit.left.length, ctx.sampleRate)
-  leftBuf.getChannelData(0).set(floatHit.left)
-  const rightBuf = ctx.createBuffer(1, floatHit.right.length, ctx.sampleRate)
-  rightBuf.getChannelData(0).set(floatHit.right)
-  const result = { left: leftBuf, right: rightBuf }
-  audioBufferCache.set(key, result)
-  return { ...result, idx }
+  const leftBuf = ctx.createBuffer(1, len, ctx.sampleRate)
+  leftBuf.getChannelData(0).set(bL)
+  const rightBuf = ctx.createBuffer(1, len, ctx.sampleRate)
+  rightBuf.getChannelData(0).set(bR)
+  return { left: leftBuf, right: rightBuf }
 }
