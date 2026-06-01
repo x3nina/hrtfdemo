@@ -30,7 +30,7 @@ const router = useRouter()
     </div>
 
     <footer class="home__footer">
-      Use headphones for best results.
+      Use headphones (and a chromium browser) for best results.
     </footer>
   </div>
 </template>

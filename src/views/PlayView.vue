@@ -24,10 +24,10 @@ const scoreMsg = computed(() => {
   const s = game.score
   if (s === null) return ''
   if (s < 5) return '★ Perfect!'
-  if (s < 15) return '◎ Excellent'
-  if (s < 30) return '◈ Good'
-  if (s < 60) return '◇ Fair'
-  return '○ Keep practicing'
+  if (s < 15) return 'Excellent'
+  if (s < 30) return 'Good'
+  if (s < 60) return 'Fair'
+  return 'Keep practicing'
 })
 
 const errorColor = computed(() => {
@@ -153,7 +153,7 @@ onUnmounted(() => {
           <kbd>Enter</kbd> to lock in your guess.
         </p>
         <div v-if="game.avgScore !== null" class="avg-score">
-          Average distance: <strong>{{ Math.round(game.avgScore) }}°</strong>
+          Average distance: <strong>{{ Math.round(game.avgScore) }}</strong>
           ({{ game.history.length }} round{{ game.history.length > 1 ? 's' : '' }})
         </div>
 
@@ -231,7 +231,7 @@ onUnmounted(() => {
         <!-- Score panel -->
         <div class="score-panel">
           <div class="score-error" :style="{ color: errorColor }">
-            {{ Math.round(game.score ?? 0) }}°
+            {{ Math.round(game.score ?? 0) }}
           </div>
           <div class="score-label">distance · lower is better</div>
           <div class="score-msg" :style="{ color: errorColor }">{{ scoreMsg }}</div>
