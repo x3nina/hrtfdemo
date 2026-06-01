@@ -60,6 +60,7 @@ export class HRTFEngine {
   private fileBuffers = new Map<string, AudioBuffer>()
   private _playing = false
 
+  private isCrossfading = false
   private mode: 'panner' | 'convolver' = 'panner'
   private profileId = 'browser-hrtf'
   private currentAz = 0
@@ -261,9 +262,13 @@ export class HRTFEngine {
 
   private schedulePositionUpdate() {
     if (!this.ctx || !this.sofaSet || !this.sofaSubjectId || this.mode !== 'convolver' || !this.cacheWarm || !this.convSlots) return
+    if (this.isCrossfading) return
+
     const { az, el } = this.relativeDir()
     const blended = tryBlendedBuffersSync(this.ctx, this.sofaSet, this.sofaSubjectId, az, el)
     if (!blended) return
+
+    this.isCrossfading = true
 
     const nextSlot = 1 - this.activeSlot
     const activeNode = this.convSlots[this.activeSlot]!
@@ -273,15 +278,14 @@ export class HRTFEngine {
     nextNode.convR.buffer = blended.right
 
     const t = this.ctx.currentTime
-    const fade = 0.010
+    const fade = 0.015
     activeNode.gain.gain.cancelScheduledValues(t)
-    activeNode.gain.gain.setValueAtTime(activeNode.gain.gain.value, t)
-    activeNode.gain.gain.linearRampToValueAtTime(0, t + fade)
+    activeNode.gain.gain.setTargetAtTime(0, t, fade / 3)
     nextNode.gain.gain.cancelScheduledValues(t)
-    nextNode.gain.gain.setValueAtTime(0, t)
-    nextNode.gain.gain.linearRampToValueAtTime(1, t + fade)
+    nextNode.gain.gain.setTargetAtTime(1, t, fade / 3)
 
     this.activeSlot = nextSlot
+    setTimeout(() => { this.isCrossfading = false }, fade * 1000)
   }
 
   setSourcePosition(azDeg: number, elDeg: number, distance = 1) {

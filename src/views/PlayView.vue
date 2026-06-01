@@ -17,6 +17,7 @@ const startX = ref(0)
 const startY = ref(0)
 let accYaw = 0
 let accPitch = 0
+let rafPending = false
 
 // Score display
 const scoreMsg = computed(() => {
@@ -69,7 +70,13 @@ function onMouseMove(e: MouseEvent) {
 
   accYaw = (accYaw + dx * 0.45) % 360
   accPitch = Math.max(-80, Math.min(80, accPitch - dy * 0.3))
-  hrtf.setListenerOrientation(accYaw, accPitch)
+  if (!rafPending) {
+    rafPending = true
+    requestAnimationFrame(() => {
+      hrtf.setListenerOrientation(accYaw, accPitch)
+      rafPending = false
+    })
+  }
 }
 
 function onMouseUp() {
@@ -93,7 +100,13 @@ function onTouchMove(e: TouchEvent) {
   startY.value = e.touches[0]!.clientY
   accYaw = (accYaw + dx * 0.45) % 360
   accPitch = Math.max(-80, Math.min(80, accPitch - dy * 0.3))
-  hrtf.setListenerOrientation(accYaw, accPitch)
+  if (!rafPending) {
+    rafPending = true
+    requestAnimationFrame(() => {
+      hrtf.setListenerOrientation(accYaw, accPitch)
+      rafPending = false
+    })
+  }
 }
 
 function onTouchEnd() { isDragging.value = false }

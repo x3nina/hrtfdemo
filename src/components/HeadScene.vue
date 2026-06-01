@@ -31,6 +31,7 @@ let lastX = 0
 let lastY = 0
 let localAz = props.azimuth
 let localEl = props.elevation
+let rafPending = false
 
 const SPHERE_R = 1.55  // reference orbit radius (at distance = 1 m)
 
@@ -249,7 +250,13 @@ function onPointerMove(e: PointerEvent) {
   localEl = Math.max(-85, Math.min(85, localEl + dy * 0.35))
 
   positionSpeaker(localAz, localEl)
-  emit('change', localAz, localEl)
+  if (!rafPending) {
+    rafPending = true
+    requestAnimationFrame(() => {
+      emit('change', localAz, localEl)
+      rafPending = false
+    })
+  }
 }
 
 function onPointerUp(e: PointerEvent) {
