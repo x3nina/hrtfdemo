@@ -226,7 +226,10 @@ function updateSize() {
   const w = canvasRef.value.clientWidth
   const h = canvasRef.value.clientHeight
   renderer.setSize(w, h, false)
-  if (camera) camera.aspect = w / h, camera.updateProjectionMatrix()
+  if (camera) {
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix()
+  }
 }
 
 // --- interaction ---
