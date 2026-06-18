@@ -40,11 +40,11 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
 
   type DS = import('h5wasm').Dataset
   const srDataset = f.get('Data.SamplingRate') as DS
-  const srVal = srDataset.value as Float64Array | number[]
+  const srVal = srDataset.value as Float64Array | number[] // 44100 | [44100]
   const sampleRate = typeof srVal === 'number' ? srVal : srVal[0]!
 
   const posDataset = f.get('SourcePosition') as DS
-  const posFlat = posDataset.value as Float64Array
+  const posFlat = posDataset.value as Float64Array // [azimuth, elevation, distance]
   const M = posDataset.shape![0]!
 
   const irDataset = f.get('Data.IR') as DS
@@ -60,18 +60,19 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
   for (let m = 0; m < M; m++) {
     const az = posFlat[m * 3]!
     const el = posFlat[m * 3 + 1]!
-    const azR = (az * Math.PI) / 180
+    const azR = (az * Math.PI) / 180 // deg -> rad
     const elR = (el * Math.PI) / 180
-    const vec: [number, number, number] = [
+    const vec: [number, number, number] = [ // sphere -> cartesian
       -Math.sin(azR) * Math.cos(elR),
       Math.sin(elR),
-      -Math.cos(azR) * Math.cos(elR),
+      Math.cos(azR) * Math.cos(elR),
     ]
     positions.push({ az, el, vec })
 
+    // hdf5 hrani IR v 3D arrayu [M, 2, N]
     const left = new Float32Array(N)
     const right = new Float32Array(N)
-    const baseL = m * 2 * N
+    const baseL = m * 2 * N // 3D array -> 1D array
     const baseR = m * 2 * N + N
     for (let n = 0; n < N; n++) {
       left[n] = irFlat[baseL + n]!
@@ -210,8 +211,7 @@ async function getResampledIR(
   return result
 }
 
-// Returns the index of the measurement whose unit vector has the highest dot product
-// with the query direction — i.e. the nearest measured position on the sphere.
+// vecji kot je skalarni produkt med vekt., manjsi je kot med njima
 export function findNearest(set: SofaHRIRSet, azDeg: number, elDeg: number): number {
   const az = (azDeg * Math.PI) / 180
   const el = (elDeg * Math.PI) / 180
