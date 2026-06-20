@@ -35,7 +35,7 @@ function sphericalToCartesian(azDeg: number, elDeg: number, r = 1) {
   return {
     x: -Math.sin(az) * Math.cos(el) * r,
     y: Math.sin(el) * r,
-    z: -Math.cos(az) * Math.cos(el) * r,
+    z: Math.cos(az) * Math.cos(el) * r,
   }
 }
 
@@ -43,10 +43,10 @@ export class HRTFEngine {
   private ctx: AudioContext | null = null
   private gainNode: GainNode | null = null
 
-  // PannerNode path (browser built-in HRTF)
+  // browser built-in HRTF
   private panner: PannerNode | null = null
 
-  // ConvolverNode path — two slots with 10ms crossfade + 4-neighbor IR blending.
+  // two slots with 10ms crossfade + 4-neighbor IR blending
   private convSlots: [ConvSlot, ConvSlot] | null = null
   private activeSlot = 0
   private convolverDistGain: GainNode | null = null
@@ -74,22 +74,15 @@ export class HRTFEngine {
     this.ctx = new AudioContext()
 
     this.gainNode = this.ctx.createGain()
-    this.gainNode.gain.value = 0.8
+    this.gainNode.gain.value = 1
     this.gainNode.connect(this.ctx.destination)
 
-    // PannerNode path
     this.panner = this.ctx.createPanner()
     this.panner.panningModel = 'HRTF'
     this.panner.distanceModel = 'inverse'
-    this.panner.refDistance = 1
-    this.panner.rolloffFactor = 1
-    this.panner.coneInnerAngle = 360
-    this.panner.coneOuterAngle = 0
-    this.panner.coneOuterGain = 0
 
-    // ConvolverNode path — two slots for crossfading
     const makeSlot = (): ConvSlot => {
-      const convL = this.ctx!.createConvolver(); convL.normalize = false
+      const convL = this.ctx!.createConvolver(); convL.normalize = false // = true bi za oba usesa biu isti volume
       const convR = this.ctx!.createConvolver(); convR.normalize = false
       const merger = this.ctx!.createChannelMerger(2)
       const gain = this.ctx!.createGain()
@@ -104,7 +97,6 @@ export class HRTFEngine {
     this.convolverDistGain = this.ctx.createGain()
     this.convolverDistGain.gain.value = 1
 
-    // Default: panner path active
     this.panner.connect(this.gainNode)
 
     const l = this.ctx.listener
@@ -190,7 +182,6 @@ export class HRTFEngine {
     this.cacheWarm = false
     this.activeSlot = 0
 
-    // Silence both slots immediately
     const t = this.ctx.currentTime
     for (const slot of this.convSlots!) {
       slot.gain.gain.cancelScheduledValues(t)
@@ -238,7 +229,7 @@ export class HRTFEngine {
     const sElR = (this.currentEl * Math.PI) / 180
     const sx = -Math.sin(sAzR) * Math.cos(sElR)
     const sy = Math.sin(sElR)
-    const sz = -Math.cos(sAzR) * Math.cos(sElR)
+    const sz = Math.cos(sAzR) * Math.cos(sElR)
 
     const yaw = (this.listenerYaw * Math.PI) / 180
     const pitch = (this.listenerPitch * Math.PI) / 180

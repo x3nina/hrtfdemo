@@ -269,4 +269,4 @@ navzkrižnim pojemanjem. Rezultat je odziven sistem za sintezo smernega zvoka v
 realnem času. Glavni inženirski kompromis — interpolacija samo magnitude — gladkost
 in stabilnost postavi pred strogo zvestobo fazi (ITD), kar je za interaktivno
 demonstracijo razumna in dobro delujoča izbira.
-```
+

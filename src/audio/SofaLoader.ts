@@ -1,9 +1,8 @@
 // IRCAM LISTEN SOFA loader
-// Files: public/hrtf/listen/IRC_XXXX_R_44100.sofa (HDF5/SOFA format)
 // SOFA SimpleFreeFieldHRIR convention:
-//   Data.IR: Float64, shape [M, 2, N] — M measurements, 2 ears (0=L,1=R), N samples
-//   SourcePosition: Float64, shape [M, 3] — [az°, el°, distance_m]
-//   az: 0=front, CCW from above (so 90=LEFT) — matches our app convention exactly
+// Data.IR: [M, 2, N] — M measurements, 2 ears (0=L,1=R), N samples
+// SourcePosition: [M, 3] — [az°, el°, distance_m]
+// az: 0=front, 90=left etc
 
 export interface SofaHRIRSet {
   positions: Array<{ az: number; el: number; vec: [number, number, number] }>
