@@ -35,7 +35,7 @@ function sphericalToCartesian(azDeg: number, elDeg: number, r = 1) {
   return {
     x: -Math.sin(az) * Math.cos(el) * r,
     y: Math.sin(el) * r,
-    z: Math.cos(az) * Math.cos(el) * r,
+    z: -Math.cos(az) * Math.cos(el) * r,
   }
 }
 
@@ -46,7 +46,7 @@ export class HRTFEngine {
   // browser built-in HRTF
   private panner: PannerNode | null = null
 
-  // two slots with 10ms crossfade + 4-neighbor IR blending
+  // two slots with 15ms crossfade + 4-neighbor IR blending
   private convSlots: [ConvSlot, ConvSlot] | null = null
   private activeSlot = 0
   private convolverDistGain: GainNode | null = null
@@ -229,7 +229,7 @@ export class HRTFEngine {
     const sElR = (this.currentEl * Math.PI) / 180
     const sx = -Math.sin(sAzR) * Math.cos(sElR)
     const sy = Math.sin(sElR)
-    const sz = Math.cos(sAzR) * Math.cos(sElR)
+    const sz = -Math.cos(sAzR) * Math.cos(sElR)
 
     const yaw = (this.listenerYaw * Math.PI) / 180
     const pitch = (this.listenerPitch * Math.PI) / 180
@@ -291,7 +291,7 @@ export class HRTFEngine {
       this.panner.positionZ.value = z
     } else if (this.mode === 'convolver') {
       if (this.convolverDistGain)
-        this.convolverDistGain.gain.value = 1 / Math.max(1, distance)
+        this.convolverDistGain.gain.value = 2 / Math.max(1, distance)
       this.schedulePositionUpdate()
     }
   }

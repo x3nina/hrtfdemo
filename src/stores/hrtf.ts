@@ -11,12 +11,10 @@ export const useHRTFStore = defineStore('hrtf', () => {
   const uploadedFiles = ref<Array<{ id: string; name: string }>>([])
   let fileIdCounter = 0
 
-  // Sound source spherical position (degrees) + distance (meters)
   const sourceAz = ref(45)
   const sourceEl = ref(0)
   const sourceDistance = ref(1)
 
-  // Listener head orientation (yaw/pitch in degrees)
   const listenerYaw = ref(0)
   const listenerPitch = ref(0)
 

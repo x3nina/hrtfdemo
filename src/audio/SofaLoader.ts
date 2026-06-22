@@ -1,9 +1,3 @@
-// IRCAM LISTEN SOFA loader
-// SOFA SimpleFreeFieldHRIR convention:
-// Data.IR: [M, 2, N] — M measurements, 2 ears (0=L,1=R), N samples
-// SourcePosition: [M, 3] — [az°, el°, distance_m]
-// az: 0=front, 90=left etc
-
 export interface SofaHRIRSet {
   positions: Array<{ az: number; el: number; vec: [number, number, number] }>
   irs: Array<{ left: Float32Array; right: Float32Array }>
@@ -57,6 +51,7 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
   const irs: SofaHRIRSet['irs'] = []
 
   for (let m = 0; m < M; m++) {
+    // az: 0=front, 90=left etc
     const az = posFlat[m * 3]!
     const el = posFlat[m * 3 + 1]!
     const azR = (az * Math.PI) / 180 // deg -> rad
@@ -64,7 +59,7 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
     const vec: [number, number, number] = [ // sphere -> cartesian
       -Math.sin(azR) * Math.cos(elR),
       Math.sin(elR),
-      Math.cos(azR) * Math.cos(elR),
+      -Math.cos(azR) * Math.cos(elR),
     ]
     positions.push({ az, el, vec })
 
@@ -85,25 +80,25 @@ export async function loadSofaSet(subjectId: string): Promise<SofaHRIRSet> {
   return set
 }
 
-// Float32Array cache — keyed by subjectId + measurement index + output sample rate.
+// key: string = subjectId + measurement index + output sample rate; 1002_0_44100
 const resampledCache = new Map<string, { left: Float32Array; right: Float32Array }>()
 
-// AudioBuffer cache — same key, avoids re-allocating buffers on every 60fps position update.
+// same key, avoids re-allocating buffers on every 60fps position update
 const audioBufferCache = new Map<string, { left: AudioBuffer; right: AudioBuffer }>()
 
-// --- Spectral blending utilities ---
-
+// spectral blending
 function nextPow2(n: number): number {
   let p = 1
   while (p < n) p <<= 1
   return p
 }
 
-// In-place radix-2 Cooley-Tukey FFT.
+// in-place radix-2 Cooley-Tukey FFT - d&c
 // forward=true → DFT: X[k] = Σ x[n] e^{-j2πkn/N}
 // forward=false → unnormalized IDFT: Σ X[k] e^{+j2πkn/N}  (divide output by N to recover x[n])
 function fftInPlace(re: Float64Array, im: Float64Array, forward: boolean): void {
   const N = re.length
+  // bit reversal 
   for (let i = 1, j = 0; i < N; i++) {
     let bit = N >> 1
     for (; j & bit; bit >>= 1) j ^= bit
@@ -113,17 +108,19 @@ function fftInPlace(re: Float64Array, im: Float64Array, forward: boolean): void 
       t = im[i]!; im[i] = im[j]!; im[j] = t
     }
   }
+  // butterfly - matches freq
   const sign = forward ? -1 : 1
   for (let len = 2; len <= N; len <<= 1) {
     const half = len >> 1
     const ang = (sign * 2 * Math.PI) / len
-    const wRe = Math.cos(ang), wIm = Math.sin(ang)
+    // avoid constant sin and cos calculations
+    const wRe = Math.cos(ang), wIm = Math.sin(ang) // from high freq to low
     for (let i = 0; i < N; i += len) {
-      let uRe = 1, uIm = 0
+      let uRe = 1, uIm = 0 // "clock hand" position
       for (let j = 0; j < half; j++) {
         const aRe = re[i + j]!, aIm = im[i + j]!
         const bRe = re[i + j + half]!, bIm = im[i + j + half]!
-        const tRe = uRe * bRe - uIm * bIm, tIm = uRe * bIm + uIm * bRe
+        const tRe = uRe * bRe - uIm * bIm, tIm = uRe * bIm + uIm * bRe // rotates
         re[i + j] = aRe + tRe; im[i + j] = aIm + tIm
         re[i + j + half] = aRe - tRe; im[i + j + half] = aIm - tIm
         const nu = uRe * wRe - uIm * wIm; uIm = uRe * wIm + uIm * wRe; uRe = nu
@@ -131,44 +128,46 @@ function fftInPlace(re: Float64Array, im: Float64Array, forward: boolean): void 
     }
   }
 }
-
-// Returns |X[k]| for k=0..fftSize-1 for a real input IR.
+// map of volumes but no phase (timing)
+// individual audios
 function realMagnitudeSpectrum(ir: Float32Array, fftSize: number): Float64Array {
   const re = new Float64Array(fftSize)
   const im = new Float64Array(fftSize)
   for (let i = 0; i < ir.length; i++) re[i] = ir[i]!
   fftInPlace(re, im, true)
   const mag = new Float64Array(fftSize)
-  for (let i = 0; i < fftSize; i++) mag[i] = Math.sqrt(re[i]! * re[i]! + im[i]! * im[i]!)
-  return mag
+  for (let i = 0; i < fftSize; i++) mag[i] = Math.sqrt(re[i]! * re[i]! + im[i]! * im[i]!) // if freq matches -> dolg vektor (loud ampl.), otherwise bliz (0, 0)
+  return mag // |X[k]|
 }
 
 // Reconstruct a minimum-phase IR from an interpolated magnitude spectrum via real cepstrum:
-// log(mag) → IFFT → causal cepstral window → FFT → exp() → IFFT
+// log(mag) -> IFFT -> causal cepstral window -> FFT -> exp() -> IFFT
+// calculate the sharpest, most physically natural timing possible
+// 4 blended audios
 function minimumPhaseFromMagnitude(mag: Float64Array, irLen: number): Float32Array {
   const N = mag.length
   const EPS = 1e-10
   const re = new Float64Array(N)
   const im = new Float64Array(N)
-  for (let i = 0; i < N; i++) re[i] = Math.log(Math.max(mag[i]!, EPS))
-  fftInPlace(re, im, false) // → re[n] = N·c[n]  (real cepstrum × N, unnormalized)
-  // Causal lifter (÷N): n=0 → 1/N, 1≤n<N/2 → 2/N (fold conjugate half), n=N/2 → 1/N, rest → 0
+  for (let i = 0; i < N; i++) re[i] = Math.log(Math.max(mag[i]!, EPS)) // human hearing is logarithmic
+  fftInPlace(re, im, false) // IFFT, but not going back to time domain, instead real cepstrum - left side holds the keys to the perfect minimum-phase timing information
+  // kavzalnost - sound wave will start exactly at time zero with no weird pre-echoes or backwards-smearing
   re[0] = re[0]! / N; im[0] = 0
   for (let n = 1; n < N / 2; n++) { re[n] = 2 * re[n]! / N; im[n] = 0 }
   re[N / 2] = re[N / 2]! / N; im[N / 2] = 0
   for (let n = N / 2 + 1; n < N; n++) { re[n] = 0; im[n] = 0 }
-  fftInPlace(re, im, true) // → log|H_min[k]| + j·φ_min[k]
-  for (let i = 0; i < N; i++) {
-    const amp = Math.exp(re[i]!)
+  fftInPlace(re, im, true) // im now contains the exact mathematical minimum-phase angles needed to perfectly reconstruct the audio
+  for (let i = 0; i < N; i++) { // back to complex coor
+    const amp = Math.exp(re[i]!) // undo log
     re[i] = amp * Math.cos(im[i]!); im[i] = amp * Math.sin(im[i]!)
   }
-  fftInPlace(re, im, false) // → N·h_min[n]
+  fftInPlace(re, im, false) // final audio in time domain
   const result = new Float32Array(irLen)
   for (let i = 0; i < irLen; i++) result[i] = re[i]! / N
   return result
 }
 
-// Keyed by subjectId_idx_sampleRate — stores pre-computed FFT magnitude spectrum per measured IR.
+// key: subjectId_idx_sampleRate — stores pre-computed FFT magnitude spectrum per measured IR.
 const magnitudeSpectraCache = new Map<string, { left: Float64Array; right: Float64Array }>()
 
 function getOrComputeMagnitudeSpectra(
@@ -210,24 +209,6 @@ async function getResampledIR(
   return result
 }
 
-// vecji kot je skalarni produkt med vekt., manjsi je kot med njima
-export function findNearest(set: SofaHRIRSet, azDeg: number, elDeg: number): number {
-  const az = (azDeg * Math.PI) / 180
-  const el = (elDeg * Math.PI) / 180
-  const qx = -Math.sin(az) * Math.cos(el)
-  const qy = Math.sin(el)
-  const qz = -Math.cos(az) * Math.cos(el)
-
-  let bestIdx = 0
-  let bestDot = -Infinity
-  for (let i = 0; i < set.positions.length; i++) {
-    const v = set.positions[i]!.vec
-    const dot = qx * v[0] + qy * v[1] + qz * v[2]
-    if (dot > bestDot) { bestDot = dot; bestIdx = i }
-  }
-  return bestIdx
-}
-
 async function resampleIfNeeded(
   ctx: AudioContext,
   data: Float32Array,
@@ -244,6 +225,25 @@ async function resampleIfNeeded(
   src.start()
   const rendered = await offline.startRendering()
   return rendered.getChannelData(0)
+}
+
+// vecji kot je skalarni produkt med vekt., manjsi je kot med njima
+// when cache not yet warm?
+export function findNearest(set: SofaHRIRSet, azDeg: number, elDeg: number): number {
+  const az = (azDeg * Math.PI) / 180
+  const el = (elDeg * Math.PI) / 180
+  const qx = -Math.sin(az) * Math.cos(el)
+  const qy = Math.sin(el)
+  const qz = -Math.cos(az) * Math.cos(el)
+
+  let bestIdx = 0
+  let bestDot = -Infinity
+  for (let i = 0; i < set.positions.length; i++) {
+    const v = set.positions[i]!.vec
+    const dot = qx * v[0] + qy * v[1] + qz * v[2]
+    if (dot > bestDot) { bestDot = dot; bestIdx = i }
+  }
+  return bestIdx
 }
 
 // Pre-loads every measurement's resampled IR into the cache. At matching sample
@@ -300,7 +300,7 @@ export async function getSofaHRIR(
   return getAudioBuffers(ctx, set, subjectId, idx)
 }
 
-// Find k nearest measured positions, weighted by dot^8, normalized to sum to 1.
+// Find k nearest measured positions, weighted by dot^8 (poudari najblizjega soseda), normalized to sum to 1.
 export function findNeighbors(
   set: SofaHRIRSet,
   azDeg: number,
@@ -333,8 +333,8 @@ export function findNeighbors(
   return top.map(({ idx }, i) => ({ idx, weight: raw[i]! / sum }))
 }
 
-// Sync blended lookup — interpolates magnitude spectra of k nearest IRs then reconstructs
-// a minimum-phase IR. Returns null if the resampled cache is not yet warm for any neighbor.
+// interpolates magnitude spectra of k nearest IRs then reconstructs
+// returns null if the resampled cache is not yet warm for any neighbor
 export function tryBlendedBuffersSync(
   ctx: AudioContext,
   set: SofaHRIRSet,
