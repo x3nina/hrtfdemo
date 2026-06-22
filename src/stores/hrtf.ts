@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { hrtfEngine, type AudioSourceId } from '@/audio/HRTFEngine'
-import { PROFILES, type HRTFProfile } from '@/audio/profiles'
+import { PROFILES, detectAvailableProfiles, type HRTFProfile } from '@/audio/profiles'
 
 export const useHRTFStore = defineStore('hrtf', () => {
   const initialized = ref(false)
@@ -18,10 +18,17 @@ export const useHRTFStore = defineStore('hrtf', () => {
   const listenerYaw = ref(0)
   const listenerPitch = ref(0)
 
-  const profiles = computed(() => PROFILES)
+  const profiles = ref<HRTFProfile[]>(PROFILES)
   const currentProfile = computed<HRTFProfile>(
-    () => PROFILES.find((p) => p.id === currentProfileId.value) ?? PROFILES[0]!,
+    () => profiles.value.find((p) => p.id === currentProfileId.value) ?? profiles.value[0]!,
   )
+
+  detectAvailableProfiles().then((available) => {
+    profiles.value = available
+    if (!available.some((p) => p.id === currentProfileId.value)) {
+      currentProfileId.value = 'browser-hrtf'
+    }
+  })
 
   async function initialize() {
     await hrtfEngine.init()
@@ -64,7 +71,7 @@ export const useHRTFStore = defineStore('hrtf', () => {
   }
 
   async function setProfile(id: string) {
-    const profile = PROFILES.find((p) => p.id === id)
+    const profile = profiles.value.find((p) => p.id === id)
     if (!profile?.available) return
     currentProfileId.value = id
     if (initialized.value) await hrtfEngine.setProfile(id)

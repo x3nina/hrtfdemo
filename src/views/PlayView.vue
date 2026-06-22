@@ -3,7 +3,6 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useGameStore } from '@/stores/game'
 import { useHRTFStore } from '@/stores/hrtf'
-import { PROFILES } from '@/audio/profiles'
 import HeadScene from '@/components/HeadScene.vue'
 
 const router = useRouter()
@@ -162,7 +161,7 @@ onUnmounted(() => {
           <span class="profile-selector__label">HRTF profile</span>
           <div class="profile-selector__options">
             <button
-              v-for="p in PROFILES"
+              v-for="p in hrtf.profiles"
               :key="p.id"
               class="profile-chip"
               :class="{
